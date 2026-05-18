@@ -1,0 +1,53 @@
+name: Deploy Image Processor to Google Cloud Run
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+  REGION: europe-west4
+  SERVICE_NAME: salp-image-processor
+  REPO_NAME: salp-images
+
+jobs:
+  deploy:
+    name: Build, Push, and Deploy
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Authenticate with Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set Up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker Authentication
+        run: |
+          gcloud auth configure-docker europe-west4-docker.pkg.dev
+
+      - name: Build and Push Docker Container
+        run: |
+          IMAGE_TAG="europe-west4-docker.pkg.dev/$PROJECT_ID/$REPO_NAME/$SERVICE_NAME:latest"
+          docker build -t $IMAGE_TAG .
+          docker push $IMAGE_TAG
+
+      - name: Deploy to Google Cloud Run
+        run: |
+          IMAGE_TAG="europe-west4-docker.pkg.dev/$PROJECT_ID/$REPO_NAME/$SERVICE_NAME:latest"
+          gcloud run deploy $SERVICE_NAME \
+            --image=$IMAGE_TAG \
+            --platform=managed \
+            --region=$REGION \
+            --cpu=1 \
+            --memory=2Gi \
+            --min-instances=0 \
+            --max-instances=100 \
+            --concurrency=10 \
+            --allow-unauthenticated

@@ -1,0 +1,21 @@
+# Virtual Environments
+.venv/
+venv/
+ENV/
+__pycache__/
+*.pyc
+
+# ML Model Weights (Always let Docker bake this, do not push to Git!)
+models/
+*.onnx
+
+# IDE Configuration
+.vscode/
+.idea/
+.DS_Store
+
+# Test outputs
+test_before.jpg
+test_output.jpg
+tests_output/
+

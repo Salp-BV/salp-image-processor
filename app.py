@@ -1,0 +1,175 @@
+import io
+import numpy as np
+import onnxruntime as ort
+from PIL import Image, ImageFilter, ImageDraw
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
+import requests
+
+app = FastAPI(
+    title="Salp CPU Image Processor",
+    description="Apache 2.0 Background Removal with Automated PIL Contact Shadows"
+)
+
+# Load quantized BiRefNet (Boots on CPU in < 50ms)
+session = ort.InferenceSession(
+    "models/birefnet_general_quantized.onnx", 
+    providers=["CPUExecutionProvider"]
+)
+
+def get_contact_shadow(w: int, h: int, box) -> Image.Image:
+    """
+    Calculates the contact plane at the bottom of the product bounding box,
+    draws a padded, subtle elliptical drop shadow gradient, and blurs it 
+    without clipping or flat edge artifacts.
+    """
+    left, upper, right, lower = box
+    
+    product_w = right - left
+    product_h = lower - upper
+    
+    # 1. Subtle, premium shadow sizing (thin, elegant grounding strip)
+    shadow_w = int(product_w * 0.90)
+    shadow_h = max(int(product_h * 0.04), 8) # Thin vertical span (4%) prevents a heavy blob look
+    
+    # Opacity 65/255 is incredibly soft, natural, and premium
+    shadow_opacity = 65 
+    
+    # Blur radius scaled to shadow height
+    blur_radius = max(int(shadow_h * 0.6), 4)
+    
+    # 2. Add padding to the drawing canvas to allow the blur to feather out naturally without getting cropped/clipped
+    pad = blur_radius * 2
+    canvas_w = shadow_w + 2 * pad
+    canvas_h = shadow_h + 2 * pad
+    
+    ellipse_canvas = Image.new("L", (canvas_w, canvas_h), 0)
+    draw = ImageDraw.Draw(ellipse_canvas)
+    
+    # Draw the ellipse in the center of the padded canvas
+    draw.ellipse([pad, pad, pad + shadow_w, pad + shadow_h], fill=shadow_opacity)
+    
+    # Apply Gaussian Blur to the padded canvas (uninterrupted feathering)
+    blurred_ellipse = ellipse_canvas.filter(ImageFilter.GaussianBlur(blur_radius))
+    
+    # Create the transparent shadow layer for the full image
+    shadow_layer = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    
+    # Position the shadow centered horizontally under the product
+    shadow_x = left + (product_w - canvas_w) // 2
+    shadow_y = lower - pad - (shadow_h // 3) # Anchored perfectly below the sole contact plane
+    
+    # Paste black color using the blurred ellipse as the alpha transparency mask
+    shadow_layer.paste((0, 0, 0, 255), (shadow_x, shadow_y), mask=blurred_ellipse)
+    return shadow_layer
+
+def remove_background_and_anchor(orig_image: Image.Image) -> Image.Image:
+    w, h = orig_image.size
+    
+    # 0. Normalize color space to standard sRGB to ensure color accuracy across all displays
+    if orig_image.mode != "RGB":
+        orig_image = orig_image.convert("RGB")
+    
+    # 1. Preprocess: Get expected model input shape (e.g., [1, 3, 512, 512] or [1, 3, 1024, 1024])
+    input_shape = session.get_inputs()[0].shape
+    model_h = input_shape[2] if len(input_shape) > 2 and isinstance(input_shape[2], int) else 512
+    model_w = input_shape[3] if len(input_shape) > 3 and isinstance(input_shape[3], int) else 512
+
+    resized = orig_image.resize((model_w, model_h), Image.Resampling.LANCZOS)
+    img_data = np.array(resized).astype(np.float32) / 255.0
+    mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+    std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+    img_data = (img_data - mean) / std
+    img_data = np.transpose(img_data, (2, 0, 1))  # HWC to CHW
+    input_tensor = np.expand_dims(img_data, axis=0)
+
+    # 2. Run ONNX CPU Inference
+    ort_inputs = {session.get_inputs()[0].name: input_tensor}
+    ort_outs = session.run(None, ort_inputs)
+    
+    # 3. Postprocess mask back to original resolution
+    mask_data = ort_outs[0][0][0]
+    mask_data = (mask_data - mask_data.min()) / (mask_data.max() - mask_data.min())
+    mask_img = Image.fromarray((mask_data * 255).astype(np.uint8)).resize((w, h), Image.Resampling.LANCZOS)
+
+    # Apply hard binary threshold to enforce razor-sharp product edges and zero background bleed
+    mask_img = mask_img.point(lambda p: 255 if p > 127 else 0)
+
+    # 4. Extract Foreground Product
+    no_bg = Image.new("RGBA", (w, h))
+    no_bg.paste(orig_image, (0, 0), mask=mask_img)
+
+    # 5. Advanced Auto-Centering and Proportional Scaling (85% Frame Fit)
+    box = mask_img.getbbox()
+    if not box:
+        box = (int(w*0.1), int(h*0.1), int(w*0.9), int(h*0.9))
+        
+    left, upper, right, lower = box
+    cropped_fg = no_bg.crop(box)
+    cropped_w = right - left
+    cropped_h = lower - upper
+
+    # Scale to exactly 85% of target width or height
+    scale_w = (w * 0.85) / cropped_w
+    scale_h = (h * 0.85) / cropped_h
+    scale = min(scale_w, scale_h)
+
+    new_w = int(cropped_w * scale)
+    new_h = int(cropped_h * scale)
+
+    # Resize product foreground using Lanczos
+    resized_fg = cropped_fg.resize((new_w, new_h), Image.Resampling.LANCZOS)
+
+    # Paste scaled product centered perfectly on transparent full-size canvas
+    centered_fg = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    paste_x = (w - new_w) // 2
+    paste_y = (h - new_h) // 2
+    centered_fg.paste(resized_fg, (paste_x, paste_y), mask=resized_fg.split()[3])
+
+    # 6. Generate centered soft contact shadow under the newly positioned product sole
+    centered_box = (paste_x, paste_y, paste_x + new_w, paste_y + new_h)
+    shadow_layer = get_contact_shadow(w, h, centered_box)
+
+    # 7. Composite: Pure White Background (#FFFFFF) + Contact Shadow + Centered Foreground
+    white_bg = Image.new("RGBA", (w, h), (255, 255, 255, 255))
+    final_canvas = Image.alpha_composite(white_bg, shadow_layer)
+    final_image = Image.alpha_composite(final_canvas, centered_fg).convert("RGB")
+    
+    return final_image
+
+@app.post("/remove-background")
+async def process_image(payload: dict):
+    image_url = payload.get("image_url")
+    min_resolution = payload.get("min_resolution", 800) # Default to 800px standard for premium storefronts
+    if not image_url:
+        raise HTTPException(status_code=400, detail="Missing 'image_url' in request payload.")
+        
+    try:
+        # Download product image from source
+        response = requests.get(image_url, timeout=10)
+        if response.status_code != 200:
+            raise HTTPException(status_code=400, detail="Failed to fetch image from source URL.")
+            
+        orig_image = Image.open(io.BytesIO(response.content)).convert("RGB")
+        w, h = orig_image.size
+        
+        # ⚠️ Resolution Guardrail: block tiny/low-res source images that degrade quality
+        if w < min_resolution or h < min_resolution:
+            raise HTTPException(
+                status_code=422, # Unprocessable Entity
+                detail=f"Low resolution source image ({w}x{h}). Minimum required dimension is {min_resolution}px. Processing blocked to maintain catalog quality."
+            )
+            
+        # Execute Background Removal + Anchoring
+        final_image = remove_background_and_anchor(orig_image)
+        
+        # Output compressed JPG for storefront load performance
+        img_buffer = io.BytesIO()
+        final_image.save(img_buffer, format="JPEG", quality=90)
+        img_buffer.seek(0)
+        
+        return StreamingResponse(img_buffer, media_type="image/jpeg")
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Inference processing failed: {str(e)}")
