@@ -49,8 +49,8 @@ jobs:
             --image=$IMAGE_TAG \
             --platform=managed \
             --region=$REGION \
-            --cpu=1 \
-            --memory=4Gi \
+            --cpu=2 \
+            --memory=8Gi \
             --min-instances=0 \
             --max-instances=100 \
             --concurrency=10 \
