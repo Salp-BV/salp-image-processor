@@ -52,7 +52,7 @@ jobs:
             --cpu=2 \
             --memory=8Gi \
             --min-instances=0 \
-            --max-instances=100 \
+            --max-instances=10 \
             --concurrency=10 \
             --allow-unauthenticated
 
