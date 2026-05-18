@@ -461,22 +461,27 @@ Because Trigger.dev runs your actual asynchronous background catalog imports, th
 
 ## 🔄 Step 7: Zero-Touch CI/CD Pipeline (GitHub Actions)
 
-To avoid compiling and pushing containers manually from your local machine, configure automated builds using **GitHub Actions**.
+To avoid compiling and pushing containers manually from your local machine, the repository is fully pre-configured to use **Workload Identity Federation (OIDC)**. This is Google Cloud's modern, zero-secret security best practice.
 
-### 1. Configure GitHub Repository Secrets
-1.  Go to your **GitHub repository** -> **Settings** -> **Secrets and variables** -> **Actions**.
-2.  Click **New repository secret** and add the following keys:
-    *   `GCP_PROJECT_ID`: Your Google Cloud Project ID.
-    *   `GCP_SA_KEY`: The base64-encoded Service Account JSON key.
+### 🔑 Why Workload Identity Federation?
+- **Zero Static Secrets:** You do not need to generate, manage, or upload any risky private key JSON files to GitHub.
+- **Auto-Authentication:** GitHub Actions dynamically requests a temporary token from Google Cloud to run the deployment.
+- **Enterprise Compliant:** It bypasses any organization security policies that restrict Service Account key creation.
 
-#### **How to create `GCP_SA_KEY` in Google Cloud Console:**
-1.  Navigate to **IAM & Admin** -> **Service Accounts**.
-2.  Click **Create Service Account** (e.g. `github-actions-deployer`).
-3.  Grant the account these three roles:
-    *   `Artifact Registry Writer` (to push the compiled image).
-    *   `Cloud Run Developer` (to deploy new revisions to Cloud Run).
-    *   `Service Account User` (to bind the service accounts).
-4.  Once created, click the service account -> **Keys** tab -> **Add Key** -> **Create new key** (select **JSON**).
-5.  Download the JSON file, copy its entire contents, and paste it into the `GCP_SA_KEY` value in your GitHub secrets!
+### 🛠️ Configured Credentials & Trust
+The pipeline is already fully set up and configured on your GCP project `salp-image-processor` with:
+- **Workload Identity Pool:** `github-pool` (Project number `921666155792`)
+- **Workload Identity Provider:** `github-provider` (Restricted via Attribute Condition to only allow tokens from `Salp-BV/salp-image-processor`)
+- **Service Account:** `github-actions-deployer@salp-image-processor.iam.gserviceaccount.com` (Authorized with `Artifact Registry Writer`, `Cloud Run Developer`, and `Service Account User` roles)
 
-Now, whenever you run a `git push origin main` or merge a PR, GitHub will compile, cache, and securely deploy your serverless microservice with zero local effort!
+### 🚀 How to Trigger Your First Deploy
+There are absolutely **no manual secrets or repository configurations needed on GitHub**! 
+
+To launch your deployment:
+1. Make any code changes to `app.py`, `Dockerfile`, or dependencies.
+2. Push your changes to the `main` branch:
+   ```bash
+   git push origin main
+   ```
+3. Open your repository's **Actions** tab on GitHub. You will see the **Deploy Image Processor to Google Cloud Run** workflow executing automatically. It will build your container inside GitHub's runner, push it to Artifact Registry, and deploy the new revision to Cloud Run seamlessly!
+
