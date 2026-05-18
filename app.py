@@ -5,6 +5,9 @@ from PIL import Image, ImageFilter, ImageDraw
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 import requests
+import socket
+from urllib.parse import urlparse
+import ipaddress
 
 app = FastAPI(
     title="Salp CPU Image Processor",
@@ -137,6 +140,41 @@ def remove_background_and_anchor(orig_image: Image.Image) -> Image.Image:
     
     return final_image
 
+def is_safe_url(url: str) -> bool:
+    """
+    Blocks Server-Side Request Forgery (SSRF) by validating that the URL scheme is HTTP/HTTPS
+    and the resolved hostname maps strictly to a public, non-internal IP address.
+    """
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            return False
+            
+        hostname = parsed.hostname
+        if not hostname:
+            return False
+            
+        # Resolve all IP addresses for the hostname
+        ips = socket.getaddrinfo(hostname, None)
+        for family, _, _, _, sockaddr in ips:
+            ip_str = sockaddr[0]
+            # Handle potential IPv6/IPv4 brackets
+            ip_str = ip_str.split('%')[0]
+            ip = ipaddress.ip_address(ip_str)
+            # Block loopback, private, link-local, multicast, and GCP Metadata server (169.254.169.254)
+            if (
+                ip.is_loopback or 
+                ip.is_private or 
+                ip.is_link_local or 
+                ip.is_multicast or 
+                ip.is_reserved or
+                ip_str == "169.254.169.254"
+            ):
+                return False
+        return True
+    except Exception:
+        return False
+
 @app.post("/remove-background")
 async def process_image(payload: dict):
     image_url = payload.get("image_url")
@@ -144,13 +182,33 @@ async def process_image(payload: dict):
     if not image_url:
         raise HTTPException(status_code=400, detail="Missing 'image_url' in request payload.")
         
+    # SSRF Protection Gate
+    if not is_safe_url(image_url):
+        raise HTTPException(
+            status_code=400, 
+            detail="Forbidden: Hostname resolves to an internal, reserved, or loopback network address."
+        )
+        
     try:
-        # Download product image from source
-        response = requests.get(image_url, timeout=10)
-        if response.status_code != 200:
-            raise HTTPException(status_code=400, detail="Failed to fetch image from source URL.")
+        # Download product image from source with size-limit streaming protection (max 25MB)
+        max_size = 25 * 1024 * 1024  # 25 MB
+        content = bytearray()
+        
+        with requests.get(image_url, timeout=10, stream=True) as response:
+            if response.status_code != 200:
+                raise HTTPException(status_code=400, detail="Failed to fetch image from source URL.")
             
-        orig_image = Image.open(io.BytesIO(response.content)).convert("RGB")
+            # Fast-path check: Verify Content-Length early if present
+            cl = response.headers.get("Content-Length")
+            if cl and int(cl) > max_size:
+                raise HTTPException(status_code=413, detail="Image file exceeds maximum allowed size (25MB).")
+                
+            for chunk in response.iter_content(chunk_size=8192):
+                content.extend(chunk)
+                if len(content) > max_size:
+                    raise HTTPException(status_code=413, detail="Image file size exceeded 25MB threshold during download.")
+            
+        orig_image = Image.open(io.BytesIO(content)).convert("RGB")
         w, h = orig_image.size
         
         # ⚠️ Resolution Guardrail: block tiny/low-res source images that degrade quality
@@ -173,3 +231,4 @@ async def process_image(payload: dict):
         raise he
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Inference processing failed: {str(e)}")
+
