@@ -1,9 +1,11 @@
 import io
+import os
 import numpy as np
 import onnxruntime as ort
 from PIL import Image, ImageFilter, ImageDraw
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request, Depends
 from fastapi.responses import StreamingResponse
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import requests
 import socket
 from urllib.parse import urlparse
@@ -175,8 +177,21 @@ def is_safe_url(url: str) -> bool:
     except Exception:
         return False
 
+IMAGE_PROCESSOR_API_KEY = os.getenv("IMAGE_PROCESSOR_API_KEY")
+security_scheme = HTTPBearer(auto_error=False)
+
 @app.post("/remove-background")
-async def process_image(payload: dict):
+async def process_image(
+    payload: dict,
+    credentials: HTTPAuthorizationCredentials = Depends(security_scheme)
+):
+    if IMAGE_PROCESSOR_API_KEY:
+        if not credentials or credentials.credentials != IMAGE_PROCESSOR_API_KEY:
+            raise HTTPException(
+                status_code=401, 
+                detail="Unauthorized: Invalid or missing API key."
+            )
+            
     image_url = payload.get("image_url")
     min_resolution = payload.get("min_resolution", 800) # Default to 800px standard for premium storefronts
     if not image_url:
