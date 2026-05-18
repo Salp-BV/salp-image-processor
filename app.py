@@ -20,7 +20,7 @@ app = FastAPI(
 opts = ort.SessionOptions()
 opts.enable_cpu_mem_arena = False  # Return memory to OS immediately, preventing RAM caching accumulation
 opts.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL  # Lower memory overhead sequential execution
-opts.intra_op_num_threads = 1  # Cap threads to prevent CPU thread context memory spikes
+opts.intra_op_num_threads = 2  # Utilize both allocated CPU cores in parallel for maximum speed
 opts.inter_op_num_threads = 1
 
 # Load quantized BiRefNet (Boots on CPU in < 50ms)
