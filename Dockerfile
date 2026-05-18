@@ -13,7 +13,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Bake quantized BiRefNet general weights into the build layer
 RUN mkdir -p models && \
     apt-get update && apt-get install -y --no-install-recommends wget && \
-    wget -q -O models/birefnet_general_quantized.onnx https://huggingface.co/briaai/BiRefNet/resolve/main/birefnet-general-epoch_244_quantized.onnx && \
+    wget -q -O models/birefnet_general_quantized.onnx https://github.com/danielgatis/rembg/releases/download/v0.0.0/BiRefNet-general-epoch_244.onnx && \
     apt-get purge -y --auto-remove wget && rm -rf /var/lib/apt/lists/*
 
 COPY app.py .
