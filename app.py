@@ -32,6 +32,26 @@ session = ort.InferenceSession(
     providers=["CPUExecutionProvider"]
 )
 
+@app.on_event("startup")
+async def warmup_session():
+    """
+    Warm up the ONNX Runtime session on startup by executing a dummy inference pass.
+    This spawns the thread pool, compiles the execution graph, and pre-allocates memory arenas
+    so that the very first external client request is processed with zero cold-start latency.
+    """
+    try:
+        input_shape = session.get_inputs()[0].shape
+        model_h = input_shape[2] if len(input_shape) > 2 and isinstance(input_shape[2], int) and input_shape[2] > 0 else 512
+        model_w = input_shape[3] if len(input_shape) > 3 and isinstance(input_shape[3], int) and input_shape[3] > 0 else 512
+        
+        dummy_tensor = np.zeros((1, 3, model_h, model_w), dtype=np.float32)
+        ort_inputs = {session.get_inputs()[0].name: dummy_tensor}
+        session.run(None, ort_inputs)
+        print("[WARMUP] ONNX session warm-up execution completed successfully. Graph is warm.")
+    except Exception as e:
+        print(f"[WARMUP WARNING] Session warm-up execution failed: {str(e)}")
+
+
 def get_contact_shadow(w: int, h: int, box) -> Image.Image:
     """
     Calculates the contact plane at the bottom of the product bounding box,
