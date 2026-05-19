@@ -102,22 +102,54 @@ def remove_background_and_anchor(orig_image: Image.Image) -> Image.Image:
     ort_inputs = {session.get_inputs()[0].name: input_tensor}
     ort_outs = session.run(None, ort_inputs)
     
-    # 3. Postprocess mask back to original resolution using mathematically absolute Sigmoid Activation
+    # 3. Postprocess: Upscale the soft Sigmoid probability map first using smooth Bicubic interpolation
     mask_data = ort_outs[0][0][0]
     mask_data = np.clip(mask_data, -12, 12)  # Avoid numerical instability / underflow in exp
-    mask_prob = 1.0 / (1.0 + np.exp(-mask_data))  # Convert raw logits to true absolute probability space [0, 1]
-
-    # Contrast adjustment and feathering: Map probability smoothly from 0-1 into alpha [0, 255]
-    # Below 0.4 probability is absolute background (0), above 0.6 is absolute foreground (255)
-    mask_prob = np.clip((mask_prob - 0.4) / (0.6 - 0.4), 0.0, 1.0)
+    mask_prob_low = 1.0 / (1.0 + np.exp(-mask_data))  # Smooth probability map [0, 1] at 512x512
     
-    # Re-scale back to original resolution and apply a subtle sub-pixel Gaussian blur for studio anti-aliasing
-    mask_img = Image.fromarray((mask_prob * 255).astype(np.uint8)).resize((w, h), Image.Resampling.LANCZOS)
+    # Upscale the soft gradient first using BICUBIC (completely bypasses Gibbs ringing, Lanczos pixelation, and blocky aliasing)
+    mask_img_low = Image.fromarray((mask_prob_low * 255).astype(np.uint8))
+    mask_img_high = mask_img_low.resize((w, h), Image.Resampling.BICUBIC)
+
+    # Convert to high-resolution numpy array for sub-pixel erosion and razor-sharp contrast mapping
+    mask_high_data = np.array(mask_img_high).astype(np.float32) / 255.0
+    
+    # Apply sub-pixel mask contraction (shift threshold from 0.4-0.6 to 0.45-0.65)
+    # This contracts the mask slightly to slice away outer background bleed while keeping outlines beautifully soft!
+    mask_high_data = np.clip((mask_high_data - 0.45) / (0.65 - 0.45), 0.0, 1.0)
+    
+    # Adaptive Pedestal/Stool Slicing: Detect if product is sitting on a flat pedestal/stool.
+    # It analyzes the horizontal projection profile (width) of the bottom 45% of the mask.
+    # If a sudden sharp width drop occurs as we go up, it indicates the pedestal-to-product transition.
+    row_sums = np.sum(mask_high_data > 0.5, axis=1)
+    active_rows = np.where(row_sums > 5)[0]
+    if len(active_rows) > 0:
+        bbox_lower = active_rows[-1]
+        search_limit = max(0, bbox_lower - int(h * 0.45))
+        
+        best_cut_y = None
+        max_drop = 0
+        for y in range(bbox_lower - 5, search_limit, -1):
+            width_current = row_sums[y]
+            width_above = row_sums[max(0, y - 12)]
+            
+            if width_current > w * 0.20:
+                drop = width_current - width_above
+                if drop > max_drop and drop > (w * 0.06):
+                    max_drop = drop
+                    best_cut_y = y
+        
+        if best_cut_y is not None:
+            # Slice mask exactly at the pedestal top boundary, leaving a clean organic cut
+            mask_high_data[best_cut_y:] = 0.0
+            
+    # Re-wrap as PIL image and apply a subtle sub-pixel Gaussian blur for a soft, professional studio finish
+    mask_img = Image.fromarray((mask_high_data * 255).astype(np.uint8))
     mask_img = mask_img.filter(ImageFilter.GaussianBlur(0.8))
 
-    # 4. Extract Foreground Product
-    no_bg = Image.new("RGBA", (w, h))
-    no_bg.paste(orig_image, (0, 0), mask=mask_img)
+    # 4. Extract Foreground Product (Keep RGB un-premultiplied to avoid PIL's transparent black fringe bug!)
+    no_bg = orig_image.copy().convert("RGBA")
+    no_bg.putalpha(mask_img)
 
     # 5. Advanced Auto-Centering and Proportional Scaling (85% Frame Fit)
     box = mask_img.getbbox()
@@ -144,13 +176,75 @@ def remove_background_and_anchor(orig_image: Image.Image) -> Image.Image:
     centered_fg = Image.new("RGBA", (w, h), (0, 0, 0, 0))
     paste_x = (w - new_w) // 2
     paste_y = (h - new_h) // 2
-    centered_fg.paste(resized_fg, (paste_x, paste_y), mask=resized_fg.split()[3])
+    # Copy pixels directly (including alpha channel) to avoid blending with black
+    centered_fg.paste(resized_fg, (paste_x, paste_y))
 
-    # 6. Generate centered soft contact shadow under the newly positioned product sole
-    centered_box = (paste_x, paste_y, paste_x + new_w, paste_y + new_h)
-    shadow_layer = get_contact_shadow(w, h, centered_box)
+    # 6. Generate grounded shadow (Adaptive Natural Shadow Extraction + Synthetic Fallback)
+    # Check if original image has a bright studio background to extract natural shadows
+    orig_gray = orig_image.convert("L")
+    corner_w = min(50, w // 10)
+    corner_h = min(50, h // 10)
+    top_left_avg = np.mean(np.array(orig_gray.crop((0, 0, corner_w, corner_h))))
+    top_right_avg = np.mean(np.array(orig_gray.crop((w - corner_w, 0, w, corner_h))))
+    bg_brightness = (top_left_avg + top_right_avg) / 2.0
+    
+    use_natural_shadow = bg_brightness >= 220.0
+    
+    shadow_layer = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    if use_natural_shadow:
+        # Extract original shadow from studio background
+        gray_arr = np.array(orig_gray).astype(np.float32)
+        shadow_intensity = 255.0 - gray_arr
+        product_mask = np.array(mask_img).astype(np.float32) / 255.0
+        # Only keep shadows outside/below the product boundaries
+        shadow_mask = shadow_intensity * (1.0 - product_mask)
+        
+        # Ground-Constraint Vertical Ramp: Only extract shadow near the bottom contact plane (bottom 15% of product and below)
+        # Any wall/background shadow behind the upper/middle product (like plant leaves) is completely wiped out.
+        y_indices = np.arange(h).reshape(h, 1)
+        y_threshold = lower - int(cropped_h * 0.15)
+        ramp_length = max(1, lower - y_threshold)
+        vertical_ramp = np.clip((y_indices - y_threshold) / ramp_length, 0.0, 1.0)
+        
+        # Apply vertical ramp to the shadow mask
+        shadow_mask = shadow_mask * vertical_ramp
+        
+        # Threshold and scale to keep it soft and organic
+        shadow_alpha = np.clip((shadow_mask - 15.0) / (120.0 - 15.0), 0.0, 1.0) * 0.85
+        
+        # Expand cropping box to capture full floor occlusion shadows below legs
+        pad_w = int(cropped_w * 0.1)
+        pad_h = int(cropped_h * 0.15)
+        shadow_box = (
+            max(0, left - pad_w),
+            max(0, upper - pad_h),
+            min(w, right + pad_w),
+            min(h, lower + pad_h)
+        )
+        s_left, s_upper, s_right, s_lower = shadow_box
+        s_w = s_right - s_left
+        s_h = s_lower - s_upper
+        
+        new_s_w = int(s_w * scale)
+        new_s_h = int(s_h * scale)
+        
+        # Crop and apply a Gaussian blur to eliminate any high-frequency extraction noise
+        cropped_shadow = Image.fromarray((shadow_alpha * 255).astype(np.uint8)).crop(shadow_box)
+        cropped_shadow = cropped_shadow.filter(ImageFilter.GaussianBlur(3))
+        resized_shadow = cropped_shadow.resize((new_s_w, new_s_h), Image.Resampling.BILINEAR)
+        
+        # Calculate matching paste offsets to align perfectly with product legs
+        paste_s_x = paste_x + int((s_left - left) * scale)
+        paste_s_y = paste_y + int((s_upper - upper) * scale)
+        
+        # Paste original shadow using the extracted mask
+        shadow_layer.paste((0, 0, 0, 255), (paste_s_x, paste_s_y), mask=resized_shadow)
+    else:
+        # Fallback to high-quality synthetic contact shadow
+        centered_box = (paste_x, paste_y, paste_x + new_w, paste_y + new_h)
+        shadow_layer = get_contact_shadow(w, h, centered_box)
 
-    # 7. Composite: Pure White Background (#FFFFFF) + Contact Shadow + Centered Foreground
+    # 7. Composite: Pure White Background (#FFFFFF) + Dynamic Shadow + Centered Foreground
     white_bg = Image.new("RGBA", (w, h), (255, 255, 255, 255))
     final_canvas = Image.alpha_composite(white_bg, shadow_layer)
     final_image = Image.alpha_composite(final_canvas, centered_fg).convert("RGB")
