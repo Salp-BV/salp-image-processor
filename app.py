@@ -85,9 +85,10 @@ def remove_background_and_anchor(orig_image: Image.Image) -> Image.Image:
     if orig_image.mode != "RGB":
         orig_image = orig_image.convert("RGB")
     
-    # 1. Preprocess: Force model native high-resolution input size (1024x1024) to capture thin structures
-    model_h = 1024
-    model_w = 1024
+    # 1. Preprocess: Get expected model input shape dynamically (ensures perfect compatibility with model specifications)
+    input_shape = session.get_inputs()[0].shape
+    model_h = input_shape[2] if len(input_shape) > 2 and isinstance(input_shape[2], int) and input_shape[2] > 0 else 512
+    model_w = input_shape[3] if len(input_shape) > 3 and isinstance(input_shape[3], int) and input_shape[3] > 0 else 512
 
     resized = orig_image.resize((model_w, model_h), Image.Resampling.LANCZOS)
     img_data = np.array(resized).astype(np.float32) / 255.0
