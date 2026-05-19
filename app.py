@@ -85,10 +85,9 @@ def remove_background_and_anchor(orig_image: Image.Image) -> Image.Image:
     if orig_image.mode != "RGB":
         orig_image = orig_image.convert("RGB")
     
-    # 1. Preprocess: Get expected model input shape (e.g., [1, 3, 512, 512] or [1, 3, 1024, 1024])
-    input_shape = session.get_inputs()[0].shape
-    model_h = input_shape[2] if len(input_shape) > 2 and isinstance(input_shape[2], int) else 512
-    model_w = input_shape[3] if len(input_shape) > 3 and isinstance(input_shape[3], int) else 512
+    # 1. Preprocess: Force model native high-resolution input size (1024x1024) to capture thin structures
+    model_h = 1024
+    model_w = 1024
 
     resized = orig_image.resize((model_w, model_h), Image.Resampling.LANCZOS)
     img_data = np.array(resized).astype(np.float32) / 255.0
@@ -102,13 +101,18 @@ def remove_background_and_anchor(orig_image: Image.Image) -> Image.Image:
     ort_inputs = {session.get_inputs()[0].name: input_tensor}
     ort_outs = session.run(None, ort_inputs)
     
-    # 3. Postprocess mask back to original resolution
+    # 3. Postprocess mask back to original resolution using mathematically absolute Sigmoid Activation
     mask_data = ort_outs[0][0][0]
-    mask_data = (mask_data - mask_data.min()) / (mask_data.max() - mask_data.min())
-    mask_img = Image.fromarray((mask_data * 255).astype(np.uint8)).resize((w, h), Image.Resampling.LANCZOS)
+    mask_data = np.clip(mask_data, -12, 12)  # Avoid numerical instability / underflow in exp
+    mask_prob = 1.0 / (1.0 + np.exp(-mask_data))  # Convert raw logits to true absolute probability space [0, 1]
 
-    # Apply hard binary threshold to enforce razor-sharp product edges and zero background bleed
-    mask_img = mask_img.point(lambda p: 255 if p > 127 else 0)
+    # Contrast adjustment and feathering: Map probability smoothly from 0-1 into alpha [0, 255]
+    # Below 0.4 probability is absolute background (0), above 0.6 is absolute foreground (255)
+    mask_prob = np.clip((mask_prob - 0.4) / (0.6 - 0.4), 0.0, 1.0)
+    
+    # Re-scale back to original resolution and apply a subtle sub-pixel Gaussian blur for studio anti-aliasing
+    mask_img = Image.fromarray((mask_prob * 255).astype(np.uint8)).resize((w, h), Image.Resampling.LANCZOS)
+    mask_img = mask_img.filter(ImageFilter.GaussianBlur(0.8))
 
     # 4. Extract Foreground Product
     no_bg = Image.new("RGBA", (w, h))
