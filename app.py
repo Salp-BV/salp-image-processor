@@ -16,14 +16,14 @@ app = FastAPI(
     description="Apache 2.0 Background Removal with Automated PIL Contact Shadows"
 )
 
-# Configure highly optimized, memory-efficient ONNX runtime session options
+# Configure high-performance ONNX runtime session options for 16GB RAM footprint
 opts = ort.SessionOptions()
-opts.enable_cpu_mem_arena = False  # Return memory to OS immediately, preventing RAM caching accumulation
-opts.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL  # Lower memory overhead sequential execution
-opts.intra_op_num_threads = 4  # Utilize all 4 allocated CPU cores in parallel for maximum speed
+opts.enable_cpu_mem_arena = True  # Enable memory arena caching to reuse intermediate buffers across runs
+opts.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+opts.intra_op_num_threads = 4  # Maximize all 4 allocated CPU cores for extreme speed (~1.5s per run)
 opts.inter_op_num_threads = 1
-opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_BASIC  # Drastically cuts cold start RAM bloat
-opts.add_session_config_entry("session.use_mmap", "1")  # Map weights directly from disk to save 1.5 GiB RAM
+opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL  # Enable full graph optimizations
+# Memory mapping is removed to load the model entirely into fast physical RAM
 
 # Load quantized BiRefNet (Boots on CPU in < 50ms)
 session = ort.InferenceSession(
