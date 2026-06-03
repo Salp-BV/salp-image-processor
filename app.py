@@ -145,7 +145,11 @@ def remove_background_and_anchor(orig_image: Image.Image) -> Image.Image:
     active_rows = np.where(row_sums > 5)[0]
     if len(active_rows) > 0:
         bbox_lower = active_rows[-1]
-        search_limit = max(0, bbox_lower - int(h * 0.45))
+        bbox_upper = active_rows[0]
+        product_height = bbox_lower - bbox_upper
+        # Only search within the bottom 30% of the actual product height,
+        # and limit search to no higher than 45% of total canvas height.
+        search_limit = max(bbox_upper + int(product_height * 0.3), bbox_lower - int(h * 0.45))
         
         best_cut_y = None
         max_drop = 0
@@ -153,7 +157,8 @@ def remove_background_and_anchor(orig_image: Image.Image) -> Image.Image:
             width_current = row_sums[y]
             width_above = row_sums[max(0, y - 12)]
             
-            if width_current > w * 0.20:
+            # Ensure width_above is still substantial to avoid cutting at product top
+            if width_current > w * 0.20 and width_above > w * 0.10:
                 drop = width_current - width_above
                 if drop > max_drop and drop > (w * 0.06):
                     max_drop = drop
