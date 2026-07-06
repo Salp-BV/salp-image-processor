@@ -1,0 +1,10 @@
+[allowlist]
+paths = [
+    '''(?i).*playwright.*''',
+    '''(?i).*tests.*''',
+    '''(?i).*\.trigger.*''',
+    '''(?i).*\.next.*''',
+    '''(?i).*\.vercel.*''',
+    '''(?i).*node_modules.*''',
+    '''(?i).*\.env.*'''
+]
