@@ -6,13 +6,13 @@ This guide serves as your master, production-grade operational manual for settin
 
 ## 🏗️ Architecture Design & Flow
 
-Before beginning, review the core operational flow of the system. The Next.js portal server acts as a thin client, delegating all image segmentation and contact shadow calculations to Google Cloud Run to avoid package bloating and CUDA loading lag on your Vercel functions:
+Before beginning, review the core operational flow of the system. The Next.js portal server acts as a thin client, delegating all image segmentation and contact shadow calculations to the containerized Python microservice deployed on Coolify PaaS (Hetzner Node 1) to avoid package bloating and CUDA loading lag:
 
 ```text
 [ Lifestyle Image Url ]
           │
           ▼
-[ Trigger.dev Sync Task ] ──(POST payload)──► [ Google Cloud Run CPU API ]
+[ Trigger.dev Sync Task ] ──(POST payload)──► [ Coolify FastAPI Container (Hetzner) ]
                                                       │
                                                       ├─► Segment Foreground (BiRefNet ONNX)
                                                       ├─► Generate Soft Contact Shadow (PIL)
@@ -21,7 +21,7 @@ Before beginning, review the core operational flow of the system. The Next.js po
           ◄────────────────(Stream JPEG Bytes)────────────────┘
           │
           ▼
-[ Upload Processed Image to Saleor Core ]
+[ Upload Processed Image to Bunny CDN / Saleor Core ]
 ```
 
 ---
