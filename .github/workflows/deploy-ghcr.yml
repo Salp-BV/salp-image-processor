@@ -58,5 +58,5 @@ jobs:
             APP_UUID="z12mvoxqhvgyozf12d00tl9b"
           fi
           echo "🚀 Triggering Coolify deployment for App UUID: $APP_UUID..."
-          curl -s "http://167.233.241.9:8000/api/v1/deploy?uuid=${APP_UUID}&force=true" \
+          curl -s -X GET "http://167.233.241.9:8000/api/v1/deploy?uuid=${APP_UUID}&force=true" \
                -H "Authorization: Bearer 2|CPpqLEmGxe35qvEjqost3e4SF1DVLvW3p9FKv4lgeba80b3b"
