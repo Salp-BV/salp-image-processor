@@ -32,6 +32,11 @@ session = ort.InferenceSession(
     providers=["CPUExecutionProvider"]
 )
 
+@app.get("/health")
+@app.get("/")
+async def health_check():
+    return {"status": "ok", "service": "salp-image-processor"}
+
 @app.on_event("startup")
 async def warmup_session():
     """
