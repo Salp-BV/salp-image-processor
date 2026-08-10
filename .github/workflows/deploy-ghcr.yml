@@ -49,3 +49,14 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Trigger Coolify Deployment
+        run: |
+          if [ "${{ github.ref_name }}" = "staging" ]; then
+            APP_UUID="kxtvp0oljyvp9jtb5p4ncvuz"
+          else
+            APP_UUID="z12mvoxqhvgyozf12d00tl9b"
+          fi
+          echo "🚀 Triggering Coolify deployment for App UUID: $APP_UUID..."
+          curl -s "http://167.233.241.9:8000/api/v1/deploy?uuid=${APP_UUID}&force=true" \
+               -H "Authorization: Bearer 2|CPpqLEmGxe35qvEjqost3e4SF1DVLvW3p9FKv4lgeba80b3b"
