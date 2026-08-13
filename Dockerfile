@@ -39,18 +39,24 @@ COPY --from=builder /opt/venv /opt/venv
 COPY --from=builder /app/models /app/models
 COPY app.py .
 
-# Environment configuration
+# Environment configuration: enforce single-threaded CPU execution and suppress spin-waiting
 ENV PATH="/opt/venv/bin:$PATH" \
     PORT=8080 \
     PYTHONUNBUFFERED=1 \
     OMP_WAIT_POLICY=PASSIVE \
-    OMP_NUM_THREADS=2 \
-    ONNX_NUM_THREADS=2
+    OMP_NUM_THREADS=1 \
+    ONNX_NUM_THREADS=1 \
+    GOMP_SPINCOUNT=0 \
+    KMP_BLOCKTIME=0 \
+    OPENBLAS_NUM_THREADS=1 \
+    MKL_NUM_THREADS=1 \
+    VECLIB_MAXIMUM_THREADS=1 \
+    NUMEXPR_NUM_THREADS=1
 
 EXPOSE 8080
 
-# Health check probe for Coolify reverse proxy
-HEALTHCHECK --interval=10s --timeout=5s --start-period=5s --retries=3 \
+# Health check probe tuned for Coolify reverse proxy with grace period
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
     CMD curl -f http://localhost:8080/health || exit 1
 
 # Start Uvicorn bound to port 8080
