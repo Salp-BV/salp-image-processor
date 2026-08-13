@@ -1,9 +1,19 @@
 import io
 import os
+import sys
+import gc
+import ctypes
 
-# Set OpenMP wait policy to PASSIVE to force worker threads to yield CPU to sleep immediately after inference completes
+# 1. Enforce single-threaded execution & suppress OpenMP/BLAS spin-waiting BEFORE importing third-party C-extensions
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["ONNX_NUM_THREADS"] = "1"
 os.environ["OMP_WAIT_POLICY"] = "PASSIVE"
-os.environ["OMP_NUM_THREADS"] = os.getenv("ONNX_NUM_THREADS", "4")
+os.environ["GOMP_SPINCOUNT"] = "0"
+os.environ["KMP_BLOCKTIME"] = "0"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
+os.environ["NUMEXPR_NUM_THREADS"] = "1"
 
 import numpy as np
 import onnxruntime as ort
@@ -15,8 +25,8 @@ import requests
 import socket
 from urllib.parse import urlparse
 import ipaddress
-import gc
 import sentry_sdk
+import asyncio
 
 sentry_dsn = os.getenv("SENTRY_DSN")
 if sentry_dsn:
@@ -31,14 +41,26 @@ app = FastAPI(
     description="Apache 2.0 Background Removal with Automated PIL Contact Shadows"
 )
 
-# Configure high-performance ONNX runtime session options optimized for container memory constraints
+def trim_memory():
+    """
+    Trims unmapped heap memory pages back to the OS kernel (Linux glibc ptmalloc)
+    and forces Python garbage collection to maintain a minimal RSS memory footprint.
+    """
+    gc.collect()
+    try:
+        if sys.platform.startswith("linux"):
+            ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except Exception:
+        pass
+
+# Configure high-performance single-threaded ONNX runtime session options optimized for container memory constraints
 opts = ort.SessionOptions()
 # Disable memory arena by default to prevent large virtual memory pre-allocations from triggering cgroup OOM-killer
 enable_arena = os.getenv("ENABLE_CPU_MEM_ARENA", "false").lower() == "true"
 opts.enable_cpu_mem_arena = enable_arena
-opts.enable_mem_pattern = True  # Reuse intermediate tensor memory allocations across graph nodes
+opts.enable_mem_pattern = False  # Disable graph memory pattern pre-allocation to free node tensors immediately
 opts.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
-opts.intra_op_num_threads = int(os.getenv("ONNX_NUM_THREADS", "2"))  # 2 threads cuts memory footprint by ~50%
+opts.intra_op_num_threads = 1  # Single-threaded mode eliminates OpenMP threadpools & 200% CPU spin lock
 opts.inter_op_num_threads = 1
 opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
 
@@ -49,8 +71,6 @@ session = ort.InferenceSession(
     providers=["CPUExecutionProvider"]
 )
 
-import asyncio
-
 @app.get("/health")
 @app.get("/")
 async def health_check():
@@ -60,6 +80,7 @@ async def async_warmup_session():
     """
     Executes ONNX session warm-up in a non-blocking background thread worker
     so FastAPI/Uvicorn binds to port 8080 instantly (< 50ms) without stalling startup.
+    Trims memory immediately after warm-up completes.
     """
     def _run_warmup():
         try:
@@ -70,8 +91,9 @@ async def async_warmup_session():
             dummy_tensor = np.zeros((1, 3, model_h, model_w), dtype=np.float32)
             ort_inputs = {session.get_inputs()[0].name: dummy_tensor}
             session.run(None, ort_inputs)
-            gc.collect()
-            print("[WARMUP] ONNX session warm-up execution completed successfully. Graph is warm.")
+            del dummy_tensor, ort_inputs
+            trim_memory()
+            print("[WARMUP] ONNX session warm-up execution completed successfully. Memory trimmed.")
         except Exception as e:
             print(f"[WARMUP WARNING] Session warm-up execution failed: {str(e)}")
 
@@ -80,8 +102,6 @@ async def async_warmup_session():
 @app.on_event("startup")
 async def startup_event():
     asyncio.create_task(async_warmup_session())
-
-
 
 def get_contact_shadow(w: int, h: int, box) -> Image.Image:
     """
@@ -136,7 +156,7 @@ def remove_background_and_anchor(orig_image: Image.Image) -> Image.Image:
     if orig_image.mode != "RGB":
         orig_image = orig_image.convert("RGB")
     
-    # 1. Preprocess: Get expected model input shape dynamically (ensures perfect compatibility with model specifications)
+    # 1. Preprocess: Get expected model input shape dynamically
     input_shape = session.get_inputs()[0].shape
     model_h = input_shape[2] if len(input_shape) > 2 and isinstance(input_shape[2], int) and input_shape[2] > 0 else 512
     model_w = input_shape[3] if len(input_shape) > 3 and isinstance(input_shape[3], int) and input_shape[3] > 0 else 512
@@ -152,34 +172,32 @@ def remove_background_and_anchor(orig_image: Image.Image) -> Image.Image:
     # 2. Run ONNX CPU Inference
     ort_inputs = {session.get_inputs()[0].name: input_tensor}
     ort_outs = session.run(None, ort_inputs)
+    del input_tensor, ort_inputs, img_data, mean, std, resized
     
     # 3. Postprocess: Upscale the soft Sigmoid probability map first using smooth Bicubic interpolation
     mask_data = ort_outs[0][0][0]
     mask_data = np.clip(mask_data, -12, 12)  # Avoid numerical instability / underflow in exp
     mask_prob_low = 1.0 / (1.0 + np.exp(-mask_data))  # Smooth probability map [0, 1] at 512x512
     
-    # Upscale the soft gradient first using BICUBIC (completely bypasses Gibbs ringing, Lanczos pixelation, and blocky aliasing)
+    # Upscale the soft gradient first using BICUBIC
     mask_img_low = Image.fromarray((mask_prob_low * 255).astype(np.uint8))
     mask_img_high = mask_img_low.resize((w, h), Image.Resampling.BICUBIC)
+    del ort_outs, mask_data, mask_prob_low, mask_img_low
 
     # Convert to high-resolution numpy array for sub-pixel erosion and razor-sharp contrast mapping
     mask_high_data = np.array(mask_img_high).astype(np.float32) / 255.0
+    del mask_img_high
     
     # Apply sub-pixel mask contraction (shift threshold from 0.4-0.6 to 0.45-0.65)
-    # This contracts the mask slightly to slice away outer background bleed while keeping outlines beautifully soft!
     mask_high_data = np.clip((mask_high_data - 0.45) / (0.65 - 0.45), 0.0, 1.0)
     
     # Adaptive Pedestal/Stool Slicing: Detect if product is sitting on a flat pedestal/stool.
-    # It analyzes the horizontal projection profile (width) of the bottom 45% of the mask.
-    # If a sudden sharp width drop occurs as we go up, it indicates the pedestal-to-product transition.
     row_sums = np.sum(mask_high_data > 0.5, axis=1)
     active_rows = np.where(row_sums > 5)[0]
     if len(active_rows) > 0:
         bbox_lower = active_rows[-1]
         bbox_upper = active_rows[0]
         product_height = bbox_lower - bbox_upper
-        # Only search within the bottom 30% of the actual product height,
-        # and limit search to no higher than 45% of total canvas height.
         search_limit = max(bbox_upper + int(product_height * 0.3), bbox_lower - int(h * 0.45))
         
         best_cut_y = None
@@ -188,7 +206,6 @@ def remove_background_and_anchor(orig_image: Image.Image) -> Image.Image:
             width_current = row_sums[y]
             width_above = row_sums[max(0, y - 12)]
             
-            # Ensure width_above is still substantial to avoid cutting at product top
             if width_current > w * 0.20 and width_above > w * 0.10:
                 drop = width_current - width_above
                 if drop > max_drop and drop > (w * 0.06):
@@ -196,14 +213,14 @@ def remove_background_and_anchor(orig_image: Image.Image) -> Image.Image:
                     best_cut_y = y
         
         if best_cut_y is not None:
-            # Slice mask exactly at the pedestal top boundary, leaving a clean organic cut
             mask_high_data[best_cut_y:] = 0.0
             
-    # Re-wrap as PIL image and apply a subtle sub-pixel Gaussian blur for a soft, professional studio finish
+    # Re-wrap as PIL image and apply a subtle sub-pixel Gaussian blur for a soft studio finish
     mask_img = Image.fromarray((mask_high_data * 255).astype(np.uint8))
+    del mask_high_data, row_sums
     mask_img = mask_img.filter(ImageFilter.GaussianBlur(0.8))
 
-    # 4. Extract Foreground Product (Keep RGB un-premultiplied to avoid PIL's transparent black fringe bug!)
+    # 4. Extract Foreground Product
     no_bg = orig_image.copy().convert("RGBA")
     no_bg.putalpha(mask_img)
 
@@ -217,7 +234,6 @@ def remove_background_and_anchor(orig_image: Image.Image) -> Image.Image:
     cropped_w = right - left
     cropped_h = lower - upper
 
-    # Scale to exactly 85% of target width or height
     scale_w = (w * 0.85) / cropped_w
     scale_h = (h * 0.85) / cropped_h
     scale = min(scale_w, scale_h)
@@ -225,18 +241,14 @@ def remove_background_and_anchor(orig_image: Image.Image) -> Image.Image:
     new_w = int(cropped_w * scale)
     new_h = int(cropped_h * scale)
 
-    # Resize product foreground using Lanczos
     resized_fg = cropped_fg.resize((new_w, new_h), Image.Resampling.LANCZOS)
 
-    # Paste scaled product centered perfectly on transparent full-size canvas
     centered_fg = Image.new("RGBA", (w, h), (0, 0, 0, 0))
     paste_x = (w - new_w) // 2
     paste_y = (h - new_h) // 2
-    # Copy pixels directly (including alpha channel) to avoid blending with black
     centered_fg.paste(resized_fg, (paste_x, paste_y))
 
     # 6. Generate grounded shadow (Adaptive Natural Shadow Extraction + Synthetic Fallback)
-    # Check if original image has a bright studio background to extract natural shadows
     orig_gray = orig_image.convert("L")
     corner_w = min(50, w // 10)
     corner_h = min(50, h // 10)
@@ -248,27 +260,26 @@ def remove_background_and_anchor(orig_image: Image.Image) -> Image.Image:
     
     shadow_layer = Image.new("RGBA", (w, h), (0, 0, 0, 0))
     if use_natural_shadow:
-        # Extract original shadow from studio background
         gray_arr = np.array(orig_gray).astype(np.float32)
+        del orig_gray
         shadow_intensity = 255.0 - gray_arr
+        del gray_arr
         product_mask = np.array(mask_img).astype(np.float32) / 255.0
-        # Only keep shadows outside/below the product boundaries
         shadow_mask = shadow_intensity * (1.0 - product_mask)
+        del shadow_intensity, product_mask
         
-        # Ground-Constraint Vertical Ramp: Only extract shadow near the bottom contact plane (bottom 15% of product and below)
-        # Any wall/background shadow behind the upper/middle product (like plant leaves) is completely wiped out.
         y_indices = np.arange(h).reshape(h, 1)
         y_threshold = lower - int(cropped_h * 0.15)
         ramp_length = max(1, lower - y_threshold)
         vertical_ramp = np.clip((y_indices - y_threshold) / ramp_length, 0.0, 1.0)
+        del y_indices
         
-        # Apply vertical ramp to the shadow mask
         shadow_mask = shadow_mask * vertical_ramp
+        del vertical_ramp
         
-        # Threshold and scale to keep it soft and organic
         shadow_alpha = np.clip((shadow_mask - 15.0) / (120.0 - 15.0), 0.0, 1.0) * 0.85
+        del shadow_mask
         
-        # Expand cropping box to capture full floor occlusion shadows below legs
         pad_w = int(cropped_w * 0.1)
         pad_h = int(cropped_h * 0.15)
         shadow_box = (
@@ -284,19 +295,16 @@ def remove_background_and_anchor(orig_image: Image.Image) -> Image.Image:
         new_s_w = int(s_w * scale)
         new_s_h = int(s_h * scale)
         
-        # Crop and apply a Gaussian blur to eliminate any high-frequency extraction noise
         cropped_shadow = Image.fromarray((shadow_alpha * 255).astype(np.uint8)).crop(shadow_box)
+        del shadow_alpha
         cropped_shadow = cropped_shadow.filter(ImageFilter.GaussianBlur(3))
         resized_shadow = cropped_shadow.resize((new_s_w, new_s_h), Image.Resampling.BILINEAR)
         
-        # Calculate matching paste offsets to align perfectly with product legs
         paste_s_x = paste_x + int((s_left - left) * scale)
         paste_s_y = paste_y + int((s_upper - upper) * scale)
         
-        # Paste original shadow using the extracted mask
         shadow_layer.paste((0, 0, 0, 255), (paste_s_x, paste_s_y), mask=resized_shadow)
     else:
-        # Fallback to high-quality synthetic contact shadow
         centered_box = (paste_x, paste_y, paste_x + new_w, paste_y + new_h)
         shadow_layer = get_contact_shadow(w, h, centered_box)
 
@@ -321,14 +329,11 @@ def is_safe_url(url: str) -> bool:
         if not hostname:
             return False
             
-        # Resolve all IP addresses for the hostname
         ips = socket.getaddrinfo(hostname, None)
         for family, _, _, _, sockaddr in ips:
             ip_str = sockaddr[0]
-            # Handle potential IPv6/IPv4 brackets
             ip_str = ip_str.split('%')[0]
             ip = ipaddress.ip_address(ip_str)
-            # Block loopback, private, link-local, multicast, and GCP Metadata server (169.254.169.254)
             if (
                 ip.is_loopback or 
                 ip.is_private or 
@@ -378,7 +383,6 @@ async def process_image(
             if response.status_code != 200:
                 raise HTTPException(status_code=400, detail="Failed to fetch image from source URL.")
             
-            # Fast-path check: Verify Content-Length early if present
             cl = response.headers.get("Content-Length")
             if cl and int(cl) > max_size:
                 raise HTTPException(status_code=413, detail="Image file exceeds maximum allowed size (25MB).")
@@ -391,15 +395,15 @@ async def process_image(
         orig_image = Image.open(io.BytesIO(content)).convert("RGB")
         w, h = orig_image.size
         
-        # ⚠️ Resolution Guardrail: block tiny/low-res source images that degrade quality
+        # Resolution Guardrail: block tiny/low-res source images that degrade quality
         if w < min_resolution or h < min_resolution:
             raise HTTPException(
-                status_code=422, # Unprocessable Entity
+                status_code=422,
                 detail=f"Low resolution source image ({w}x{h}). Minimum required dimension is {min_resolution}px. Processing blocked to maintain catalog quality."
             )
             
-        # Upper-Bound Resolution Guardrail: Downscale oversized images to max 2048px for storefront optimization and RAM protection
-        max_dimension = int(os.getenv("MAX_IMAGE_DIMENSION", "2048"))
+        # Upper-Bound Resolution Guardrail: Downscale oversized images to max 1200px for storefront optimization and RAM protection
+        max_dimension = int(os.getenv("MAX_IMAGE_DIMENSION", "1200"))
         if w > max_dimension or h > max_dimension:
             scale = max_dimension / float(max(w, h))
             new_w = max(1, int(w * scale))
@@ -414,10 +418,10 @@ async def process_image(
         final_image.save(img_buffer, format="JPEG", quality=90)
         img_buffer.seek(0)
         
-        gc.collect()
         return StreamingResponse(img_buffer, media_type="image/jpeg")
     except HTTPException as he:
         raise he
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Inference processing failed: {str(e)}")
-
+    finally:
+        trim_memory()
