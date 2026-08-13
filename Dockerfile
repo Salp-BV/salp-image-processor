@@ -40,7 +40,9 @@ COPY app.py .
 # Environment configuration
 ENV PATH="/opt/venv/bin:$PATH" \
     PORT=8080 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    OMP_WAIT_POLICY=PASSIVE \
+    OMP_NUM_THREADS=4
 
 EXPOSE 8080
 
