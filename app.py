@@ -10,6 +10,15 @@ import requests
 import socket
 from urllib.parse import urlparse
 import ipaddress
+import sentry_sdk
+
+sentry_dsn = os.getenv("SENTRY_DSN")
+if sentry_dsn:
+    sentry_sdk.init(
+        dsn=sentry_dsn,
+        environment=os.getenv("ENVIRONMENT", "production"),
+        traces_sample_rate=1.0,
+    )
 
 app = FastAPI(
     title="Salp CPU Image Processor",
