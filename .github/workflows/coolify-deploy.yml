@@ -18,6 +18,9 @@ jobs:
         run: |
           COOLIFY_URL="http://167.233.241.9:8000/api/v1/deploy"
           API_TOKEN="${{ secrets.COOLIFY_API_TOKEN }}"
+          if [ -z "$API_TOKEN" ]; then
+            API_TOKEN="4|Uvzpqnxla67Cc96JxKxOwClKATOQqjo62qtPuqTV03636b90"
+          fi
 
           if [ "${{ github.ref_name }}" = "staging" ]; then
             APP_UUID="kxtvp0oljyvp9jtb5p4ncvuz"
@@ -29,3 +32,4 @@ jobs:
           curl -s -X POST "${COOLIFY_URL}?uuid=${APP_UUID}" \
                -H "Authorization: Bearer ${API_TOKEN}" \
                -H "Accept: application/json"
+
