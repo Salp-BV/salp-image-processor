@@ -10,6 +10,7 @@ import requests
 import socket
 from urllib.parse import urlparse
 import ipaddress
+import gc
 import sentry_sdk
 
 sentry_dsn = os.getenv("SENTRY_DSN")
@@ -25,14 +26,15 @@ app = FastAPI(
     description="Apache 2.0 Background Removal with Automated PIL Contact Shadows"
 )
 
-# Configure high-performance ONNX runtime session options for 16GB RAM footprint
+# Configure high-performance ONNX runtime session options optimized for container memory constraints
 opts = ort.SessionOptions()
-opts.enable_cpu_mem_arena = True  # Enable memory arena caching to reuse intermediate buffers across runs
+# Disable memory arena by default to prevent large virtual memory pre-allocations from triggering cgroup OOM-killer
+enable_arena = os.getenv("ENABLE_CPU_MEM_ARENA", "false").lower() == "true"
+opts.enable_cpu_mem_arena = enable_arena
 opts.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
-opts.intra_op_num_threads = 4  # Maximize all 4 allocated CPU cores for extreme speed (~1.5s per run)
+opts.intra_op_num_threads = int(os.getenv("ONNX_NUM_THREADS", "4"))
 opts.inter_op_num_threads = 1
-opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL  # Enable full graph optimizations
-# Memory mapping is removed to load the model entirely into fast physical RAM
+opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
 
 # Load quantized BiRefNet (Boots on CPU in < 50ms)
 session = ort.InferenceSession(
@@ -389,6 +391,14 @@ async def process_image(
                 detail=f"Low resolution source image ({w}x{h}). Minimum required dimension is {min_resolution}px. Processing blocked to maintain catalog quality."
             )
             
+        # Upper-Bound Resolution Guardrail: Downscale oversized images to max 2048px for storefront optimization and RAM protection
+        max_dimension = int(os.getenv("MAX_IMAGE_DIMENSION", "2048"))
+        if w > max_dimension or h > max_dimension:
+            scale = max_dimension / float(max(w, h))
+            new_w = max(1, int(w * scale))
+            new_h = max(1, int(h * scale))
+            orig_image = orig_image.resize((new_w, new_h), Image.Resampling.LANCZOS)
+            
         # Execute Background Removal + Anchoring
         final_image = remove_background_and_anchor(orig_image)
         
@@ -397,6 +407,7 @@ async def process_image(
         final_image.save(img_buffer, format="JPEG", quality=90)
         img_buffer.seek(0)
         
+        gc.collect()
         return StreamingResponse(img_buffer, media_type="image/jpeg")
     except HTTPException as he:
         raise he
