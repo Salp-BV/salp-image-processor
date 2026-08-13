@@ -4,9 +4,9 @@ import sys
 import gc
 import ctypes
 
-# 1. Enforce single-threaded execution & suppress OpenMP/BLAS spin-waiting BEFORE importing third-party C-extensions
-os.environ["OMP_NUM_THREADS"] = "1"
-os.environ["ONNX_NUM_THREADS"] = "1"
+# 1. Enforce thread limits & suppress OpenMP/BLAS spin-waiting BEFORE importing third-party C-extensions
+os.environ["OMP_NUM_THREADS"] = os.getenv("ONNX_NUM_THREADS", "2")
+os.environ["ONNX_NUM_THREADS"] = os.getenv("ONNX_NUM_THREADS", "2")
 os.environ["OMP_WAIT_POLICY"] = "PASSIVE"
 os.environ["GOMP_SPINCOUNT"] = "0"
 os.environ["KMP_BLOCKTIME"] = "0"
@@ -53,55 +53,32 @@ def trim_memory():
     except Exception:
         pass
 
-# Configure high-performance single-threaded ONNX runtime session options optimized for container memory constraints
+# Configure high-performance ONNX runtime session options optimized for container memory & CPU constraints
 opts = ort.SessionOptions()
-# Disable memory arena by default to prevent large virtual memory pre-allocations from triggering cgroup OOM-killer
 enable_arena = os.getenv("ENABLE_CPU_MEM_ARENA", "false").lower() == "true"
 opts.enable_cpu_mem_arena = enable_arena
 opts.enable_mem_pattern = False  # Disable graph memory pattern pre-allocation to free node tensors immediately
 opts.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
-opts.intra_op_num_threads = 1  # Single-threaded mode eliminates OpenMP threadpools & 200% CPU spin lock
+opts.intra_op_num_threads = int(os.getenv("ONNX_NUM_THREADS", "2"))
 opts.inter_op_num_threads = 1
-opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+# CRITICAL: Disable ONNX Runtime intra-op threadpool spin-waiting to force worker threads to sleep immediately when idle (0.0% CPU)
+opts.add_session_config_entry("session.intra_op.allow_spinning", "0")
+opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_BASIC
 
-# Load quantized BiRefNet (Boots on CPU in < 50ms)
+# Load BiRefNet model session
 session = ort.InferenceSession(
     "models/birefnet_general_quantized.onnx", 
     sess_options=opts,
     providers=["CPUExecutionProvider"]
 )
 
+# Call trim_memory after loading session graph
+trim_memory()
+
 @app.get("/health")
 @app.get("/")
 async def health_check():
     return {"status": "ok", "service": "salp-image-processor"}
-
-async def async_warmup_session():
-    """
-    Executes ONNX session warm-up in a non-blocking background thread worker
-    so FastAPI/Uvicorn binds to port 8080 instantly (< 50ms) without stalling startup.
-    Trims memory immediately after warm-up completes.
-    """
-    def _run_warmup():
-        try:
-            input_shape = session.get_inputs()[0].shape
-            model_h = input_shape[2] if len(input_shape) > 2 and isinstance(input_shape[2], int) and input_shape[2] > 0 else 512
-            model_w = input_shape[3] if len(input_shape) > 3 and isinstance(input_shape[3], int) and input_shape[3] > 0 else 512
-            
-            dummy_tensor = np.zeros((1, 3, model_h, model_w), dtype=np.float32)
-            ort_inputs = {session.get_inputs()[0].name: dummy_tensor}
-            session.run(None, ort_inputs)
-            del dummy_tensor, ort_inputs
-            trim_memory()
-            print("[WARMUP] ONNX session warm-up execution completed successfully. Memory trimmed.")
-        except Exception as e:
-            print(f"[WARMUP WARNING] Session warm-up execution failed: {str(e)}")
-
-    await asyncio.to_thread(_run_warmup)
-
-@app.on_event("startup")
-async def startup_event():
-    asyncio.create_task(async_warmup_session())
 
 def get_contact_shadow(w: int, h: int, box) -> Image.Image:
     """
