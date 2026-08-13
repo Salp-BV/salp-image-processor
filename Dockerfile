@@ -2,10 +2,11 @@ FROM python:3.10-slim-bookworm
 
 WORKDIR /app
 
-# Install standard C++ dependencies for ONNX runtime and curl for Coolify health probes
+# Install standard C++ dependencies for ONNX runtime, curl, and wget for Coolify health probes
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     curl \
+    wget \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
