@@ -36,8 +36,9 @@ opts = ort.SessionOptions()
 # Disable memory arena by default to prevent large virtual memory pre-allocations from triggering cgroup OOM-killer
 enable_arena = os.getenv("ENABLE_CPU_MEM_ARENA", "false").lower() == "true"
 opts.enable_cpu_mem_arena = enable_arena
+opts.enable_mem_pattern = True  # Reuse intermediate tensor memory allocations across graph nodes
 opts.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
-opts.intra_op_num_threads = int(os.getenv("ONNX_NUM_THREADS", "4"))
+opts.intra_op_num_threads = int(os.getenv("ONNX_NUM_THREADS", "2"))  # 2 threads cuts memory footprint by ~50%
 opts.inter_op_num_threads = 1
 opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
 
@@ -69,6 +70,7 @@ async def async_warmup_session():
             dummy_tensor = np.zeros((1, 3, model_h, model_w), dtype=np.float32)
             ort_inputs = {session.get_inputs()[0].name: dummy_tensor}
             session.run(None, ort_inputs)
+            gc.collect()
             print("[WARMUP] ONNX session warm-up execution completed successfully. Graph is warm.")
         except Exception as e:
             print(f"[WARMUP WARNING] Session warm-up execution failed: {str(e)}")
