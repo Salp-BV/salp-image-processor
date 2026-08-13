@@ -1,5 +1,10 @@
 import io
 import os
+
+# Set OpenMP wait policy to PASSIVE to force worker threads to yield CPU to sleep immediately after inference completes
+os.environ["OMP_WAIT_POLICY"] = "PASSIVE"
+os.environ["OMP_NUM_THREADS"] = os.getenv("ONNX_NUM_THREADS", "4")
+
 import numpy as np
 import onnxruntime as ort
 from PIL import Image, ImageFilter, ImageDraw
