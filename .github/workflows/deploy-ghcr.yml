@@ -59,10 +59,10 @@ jobs:
           fi
           API_TOKEN="${{ secrets.COOLIFY_API_TOKEN }}"
           if [ -z "$API_TOKEN" ]; then
-            API_TOKEN="4|Uvzpqnxla67Cc96JxKxOwClKATOQqjo62qtPuqTV03636b90"
+            echo "❌ Error: COOLIFY_API_TOKEN secret is not set in GitHub repository settings."
+            exit 1
           fi
           echo "🚀 Triggering Coolify deployment for App UUID: $APP_UUID..."
           curl -s -X POST "http://167.233.241.9:8000/api/v1/deploy?uuid=${APP_UUID}&force=true" \
                -H "Authorization: Bearer ${API_TOKEN}" \
                -H "Accept: application/json"
-
