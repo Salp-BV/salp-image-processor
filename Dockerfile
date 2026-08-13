@@ -27,9 +27,11 @@ FROM python:3.10-slim-bookworm AS runner
 
 WORKDIR /app
 
-# Install curl for Coolify health probes
+# Install curl, wget, and ca-certificates for Coolify health probes
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
+    wget \
+    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy virtual environment and model from builder stage
