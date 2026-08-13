@@ -12,9 +12,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Bake quantized BiRefNet weights into the build layer
+# Bake lightweight BiRefNet ONNX weights into the build layer (224MB)
 RUN mkdir -p models && \
-    curl -L "https://github.com/danielgatis/rembg/releases/download/v0.0.0/BiRefNet-general-epoch_244.onnx" -o models/birefnet_general_quantized.onnx
+    curl -L "https://github.com/danielgatis/rembg/releases/download/v0.0.0/BiRefNet-general-bb_swin_v1_tiny-epoch_232.onnx" -o models/birefnet_general_quantized.onnx
 
 COPY app.py .
 
@@ -26,4 +26,5 @@ EXPOSE 8080
 HEALTHCHECK --interval=10s --timeout=5s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:8080/health || exit 1
 
-CMD ["sh", "-c", "uvicorn app:app --host 0.0.0.0 --port ${PORT:-8080} --workers 1"]
+# Hardcode --port 8080 so build-arg PORT=8000 cannot override uvicorn port
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8080", "--workers", "1"]
