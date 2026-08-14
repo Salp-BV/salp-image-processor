@@ -30,10 +30,12 @@ import asyncio
 
 sentry_dsn = os.getenv("SENTRY_DSN")
 if sentry_dsn:
+    sentry_env = os.getenv("APP_ENV", os.getenv("ENVIRONMENT", "production")).lower()
+    traces_rate = 1.0 if sentry_env in ["development", "staging", "stg"] else float(os.getenv("SENTRY_TRACES_SAMPLE_RATE", "0.1"))
     sentry_sdk.init(
         dsn=sentry_dsn,
-        environment=os.getenv("ENVIRONMENT", "production"),
-        traces_sample_rate=1.0,
+        environment=sentry_env,
+        traces_sample_rate=traces_rate,
     )
 
 app = FastAPI(
