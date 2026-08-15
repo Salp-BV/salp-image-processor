@@ -1,0 +1,40 @@
+# Environment & Secrets (Zero-Leakage Guarantee)
+.env*
+!.env.example
+*.env
+*.key
+*.pem
+*.cert
+*.crt
+gcp-service-account.json
+*.json.key
+
+# Git & CI/CD
+.git
+.github
+.husky
+
+# Python Artifacts & Caches
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+pip-log.txt
+pip-delete-this-directory.txt
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.log
+
+# Tests & Reports
+tests
+docs
+scratch

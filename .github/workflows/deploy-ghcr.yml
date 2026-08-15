@@ -1,0 +1,76 @@
+name: Build and Push Salp Image Processor Docker Image to GHCR
+
+on:
+  push:
+    branches:
+      - staging
+      - main
+      - master
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-push:
+    name: Build & Push Image Processor Image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Metadata / Tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=raw,value=latest,enable=${{ github.ref_name == 'main' || github.ref_name == 'master' }}
+            type=raw,value=main,enable=${{ github.ref_name == 'main' || github.ref_name == 'master' }}
+            type=raw,value=staging,enable=${{ github.ref_name == 'staging' }}
+            type=sha,format=short
+
+      - name: Build and Push Docker Image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Trigger Coolify Deployment
+        run: |
+          COOLIFY_URL="http://167.233.241.9:8000/api/v1/deploy"
+          API_TOKEN="${{ secrets.COOLIFY_API_TOKEN }}"
+
+          if [ -z "$API_TOKEN" ]; then
+            echo "❌ Error: COOLIFY_API_TOKEN secret is not set in GitHub repository settings."
+            exit 1
+          fi
+
+          if [ "${{ github.ref_name }}" = "staging" ]; then
+            APP_UUID="kxtvp0oljyvp9jtb5p4ncvuz"
+          else
+            APP_UUID="z12mvoxqhvgyozf12d00tl9b"
+          fi
+
+          echo "🚀 Triggering Coolify deployment for Salp Image Processor (UUID: $APP_UUID) on branch ${{ github.ref_name }}..."
+          curl -s -f -X POST "${COOLIFY_URL}?uuid=${APP_UUID}&force=true" \
+               -H "Authorization: Bearer ${API_TOKEN}" \
+               -H "Accept: application/json"
