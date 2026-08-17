@@ -1,0 +1,28 @@
+name: Auto Back-Sync Main to Staging
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  back-sync:
+    name: Back-Sync Main into Staging
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Staging
+        uses: actions/checkout@v4
+        with:
+          ref: staging
+          fetch-depth: 0
+
+      - name: Merge Main into Staging
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git fetch origin main:main
+          git merge main -m "chore(git): auto back-sync main into staging [skip ci]" || {
+            echo "⚠️ Merge conflict detected during back-sync. Please reconcile staging with main manually."
+            exit 1
+          }
+          git push origin staging

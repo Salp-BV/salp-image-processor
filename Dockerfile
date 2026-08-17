@@ -16,14 +16,18 @@ ENV PATH="/opt/venv/bin:$PATH"
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Pre-bake lightweight BiRefNet ONNX weights (224MB) with download retries
+# Pre-bake high-accuracy lightweight U2Net ONNX weights (168MB) with download retries
 RUN mkdir -p models && \
     curl -sSL --retry 5 --retry-delay 2 --connect-timeout 30 \
-    "https://github.com/danielgatis/rembg/releases/download/v0.0.0/BiRefNet-general-bb_swin_v1_tiny-epoch_232.onnx" \
-    -o models/birefnet_general_quantized.onnx
+    "https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2net.onnx" \
+    -o models/u2net.onnx
 
-# Stage 2: Final minimal runtime stage
+# Stage 2: Final minimal & rootless runtime stage
 FROM python:3.10-slim-bookworm AS runner
+
+# Create dedicated unprivileged non-root system user & group
+RUN groupadd -g 10001 appgroup && \
+    useradd -u 10001 -g appgroup -s /sbin/nologin -M appuser
 
 WORKDIR /app
 
@@ -38,6 +42,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=builder /opt/venv /opt/venv
 COPY --from=builder /app/models /app/models
 COPY app.py .
+
+# Grant permissions to unprivileged user
+RUN chown -R appuser:appgroup /app /opt/venv
+
+USER appuser
 
 # Environment configuration: enforce single-threaded CPU execution and suppress spin-waiting
 ENV PATH="/opt/venv/bin:$PATH" \
