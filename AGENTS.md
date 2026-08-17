@@ -58,6 +58,15 @@ pytest
 git push -u origin feat/your-feature-name
 ```
 
+#### Step 6: Post-Merge Workspace Cleanup (Return to Clean Staging)
+After your PR is merged into staging on GitHub:
+```bash
+git checkout staging
+git pull --ff-only origin staging
+git branch -d feat/your-feature-name
+git fetch --prune
+```
+
 ---
 
 ### 3. PR Merge Policy: Two-Tier Strategy
