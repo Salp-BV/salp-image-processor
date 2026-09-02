@@ -1,4 +1,4 @@
-﻿name: Build and Deploy Salp GPU Image Processor to RunPod Serverless
+name: Build and Deploy Salp GPU Image Processor to RunPod Serverless
 
 on:
   push:
@@ -69,7 +69,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install Provisioning Dependencies
-        run: pip install requests
+        run: pip install requests runpod
 
       - name: Deploy & Synchronize RunPod Endpoint
         env:
