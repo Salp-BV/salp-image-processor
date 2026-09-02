@@ -1,4 +1,4 @@
-﻿# Stage 1: Dependency Builder & Weight Baker
+# Stage 1: Dependency Builder & Weight Baker
 FROM nvidia/cuda:12.4.1-base-ubuntu22.04 AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -21,6 +21,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.11-venv \
     python3.11-dev \
     python3-pip \
+    libgl1 \
+    libglib2.0-0 \
+    libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
 RUN python3.11 -m venv /opt/venv
