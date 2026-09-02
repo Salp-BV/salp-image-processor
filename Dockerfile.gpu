@@ -1,0 +1,89 @@
+﻿# Stage 1: Dependency Builder & Weight Baker
+FROM nvidia/cuda:12.4.1-base-ubuntu22.04 AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    XDG_CACHE_HOME=/app/.cache \
+    TORCH_HOME=/app/.cache/torch \
+    HF_HOME=/app/.cache/huggingface
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    software-properties-common \
+    curl \
+    ca-certificates \
+    git \
+    && add-apt-repository ppa:deadsnakes/ppa -y \
+    && apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 \
+    python3.11-venv \
+    python3.11-dev \
+    python3-pip \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python3.11 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+COPY requirements-gpu.txt .
+RUN pip install --upgrade pip setuptools wheel && \
+    pip install -r requirements-gpu.txt
+
+# Pre-bake complete BiRefNet (MIT) and YOLO-World weights
+RUN mkdir -p /app/models /app/.cache && \
+    python3.11 -c "from huggingface_hub import snapshot_download; \
+    snapshot_download(repo_id='ZhengPeng7/BiRefNet', local_dir='/app/models/birefnet', local_dir_use_symlinks=False)" && \
+    python3.11 -c "from ultralytics import YOLO; \
+    m = YOLO('yolov8s-worldv2.pt'); \
+    m.set_classes(['product', 'merchandise'])" && \
+    mv yolov8s-worldv2.pt /app/models/yolov8s-worldv2.pt
+
+# Stage 2: Hardened Rootless Runtime
+FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04 AS runner
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PATH="/opt/venv/bin:$PATH" \
+    NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility \
+    PORT=8080 \
+    HOME=/app \
+    YOLO_CONFIG_DIR=/tmp \
+    XDG_CACHE_HOME=/app/.cache \
+    MODEL_PATH="/app/models/birefnet" \
+    YOLO_MODEL_PATH="/app/models/yolov8s-worldv2.pt"
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    software-properties-common \
+    curl \
+    ca-certificates \
+    libgomp1 \
+    libgl1 \
+    libglib2.0-0 \
+    && add-apt-repository ppa:deadsnakes/ppa -y \
+    && apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN groupadd -g 10001 appgroup && \
+    useradd -u 10001 -g appgroup -s /sbin/nologin -d /app appuser && \
+    mkdir -p /app/.cache /tmp && \
+    chown -R 10001:10001 /app /tmp
+
+COPY --chown=10001:10001 --from=builder /opt/venv /opt/venv
+COPY --chown=10001:10001 --from=builder /app/models /app/models
+COPY --chown=10001:10001 --from=builder /app/.cache /app/.cache
+COPY --chown=10001:10001 app_gpu.py /app/app.py
+
+USER appuser
+
+EXPOSE 8080
+
+HEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=3 \
+    CMD curl -f http://localhost:8080/ping || exit 1
+
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8080", "--workers", "1", "--timeout-keep-alive", "65"]
