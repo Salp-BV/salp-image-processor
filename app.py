@@ -365,35 +365,11 @@ def remove_background(payload: dict, authenticated: bool = Depends(verify_api_ke
         mask_high_data = np.array(mask_img_high).astype(np.float32) / 255.0
         del mask_img_high
         
-        # Apply sub-pixel mask contraction for crisp edges
-        mask_high_data = np.clip((mask_high_data - 0.45) / (0.65 - 0.45), 0.0, 1.0)
-        
-        # Adaptive Pedestal Slicing
-        row_sums = np.sum(mask_high_data > 0.5, axis=1)
-        active_rows = np.where(row_sums > 5)[0]
-        if len(active_rows) > 0:
-            bbox_lower = active_rows[-1]
-            bbox_upper = active_rows[0]
-            product_height = bbox_lower - bbox_upper
-            search_limit = max(bbox_upper + int(product_height * 0.3), bbox_lower - int(h * 0.45))
-            
-            best_cut_y = None
-            max_drop = 0
-            for y in range(bbox_lower - 5, search_limit, -1):
-                width_current = row_sums[y]
-                width_above = row_sums[max(0, y - 12)]
-                
-                if width_current > w * 0.20 and width_above > w * 0.10:
-                    drop = width_current - width_above
-                    if drop > max_drop and drop > (w * 0.06):
-                        max_drop = drop
-                        best_cut_y = y
-            
-            if best_cut_y is not None:
-                mask_high_data[best_cut_y:] = 0.0
+        # Apply soft contrast enhancement to sharpen edges without eroding thin structures (sunglasses arms, watch straps, poles)
+        mask_high_data = np.clip((mask_high_data - 0.30) / (0.60 - 0.30), 0.0, 1.0)
 
         mask_img = Image.fromarray((mask_high_data * 255).astype(np.uint8)).filter(ImageFilter.GaussianBlur(0.8))
-        del mask_high_data, row_sums
+        del mask_high_data
 
         # 6. Extract Foreground Product
         no_bg = orig_image.copy().convert("RGBA")

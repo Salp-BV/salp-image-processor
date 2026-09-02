@@ -18,4 +18,7 @@ models/
 test_before.jpg
 test_output.jpg
 tests_output/
+tests_eval/
+scratch_*.jpg
+test_staging_out.jpg
 
