@@ -7,7 +7,14 @@ import os
 import sys
 import requests
 import json
+import time
 import runpod
+
+if sys.platform.startswith("win"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
 RUNPOD_API_KEY = os.getenv("RUNPOD_API_KEY")
 if not RUNPOD_API_KEY:
@@ -55,7 +62,7 @@ def save_lb_endpoint(endpoint_name: str, template_id: str, is_prod: bool, existi
     return data["data"]["saveEndpoint"]["id"]
 
 def provision(env_name: str, image_tag: str, is_prod: bool):
-    template_name = f"salp-img-processor-{env_name}-tmpl"
+    template_name = f"salp-img-{env_name}-{int(time.time())}"
     endpoint_name = f"salp-img-{env_name}"
     image_name = f"ghcr.io/salp-bv/salp-image-processor:{image_tag}"
 
