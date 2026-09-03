@@ -77,7 +77,8 @@ def provision(env_name: str, image_tag: str, is_prod: bool):
             "PORT_HEALTH": "8080",
             "HEALTH_CHECK_PATH": "/ping",
             "ENVIRONMENT": env_name,
-            "IMAGE_PROCESSOR_API_KEY": os.getenv("IMAGE_PROCESSOR_API_KEY", "")
+            "IMAGE_PROCESSOR_API_KEY": os.getenv("IMAGE_PROCESSOR_API_KEY", ""),
+            "RUNPOD_API_KEY": RUNPOD_API_KEY
         },
         is_serverless=True,
         registry_auth_id=REGISTRY_AUTH_ID
