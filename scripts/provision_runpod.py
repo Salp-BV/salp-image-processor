@@ -46,7 +46,7 @@ def save_lb_endpoint(endpoint_name: str, template_id: str, is_prod: bool, existi
         "type": "LB",
         "gpuIds": "AMPERE_16,ADA_24",
         "locations": "EU-SE-1,EU-RO-1,EU-FR-1",
-        "idleTimeout": 15 if is_prod else 10,
+        "idleTimeout": int(os.getenv("RUNPOD_IDLE_TIMEOUT", "300")),
         "scalerType": "REQUEST_COUNT",
         "scalerValue": 2,
         "workersMin": 0,
