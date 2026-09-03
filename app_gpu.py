@@ -15,7 +15,6 @@ import numpy as np
 from PIL import Image, ImageFilter, ImageDraw
 from torchvision import transforms
 from transformers import AutoModelForImageSegmentation
-from ultralytics import YOLO
 from fastapi import FastAPI, HTTPException, Depends, status, Request
 from fastapi.responses import StreamingResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -48,7 +47,6 @@ if sentry_dsn:
 
 gpu_lock = threading.Lock()
 biref_model = None
-yolo_model = None
 
 image_transforms = transforms.Compose([
     transforms.Resize((1024, 1024), interpolation=transforms.InterpolationMode.BILINEAR),
@@ -104,8 +102,8 @@ def decontaminate_and_despill(orig_rgb_img: Image.Image, alpha_mask: Image.Image
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global biref_model, yolo_model
-    print(f"Initializing Two-Stage GPU Engine on device: {DEVICE}...")
+    global biref_model
+    print(f"Initializing BiRefNet GPU Engine on device: {DEVICE}...")
 
     model_path = os.getenv("MODEL_PATH", "/app/models/birefnet")
     biref_model = AutoModelForImageSegmentation.from_pretrained(
@@ -114,30 +112,20 @@ async def lifespan(app: FastAPI):
         torch_dtype=torch.float16 if DEVICE == "cuda" else torch.float32
     ).to(DEVICE).eval()
 
-    yolo_path = os.getenv("YOLO_MODEL_PATH", "/app/models/yolov8s-worldv2.pt")
-    if not os.path.exists(yolo_path):
-        yolo_path = "yolov8s-worldv2.pt"
-    yolo_model = YOLO(yolo_path)
-    yolo_model.to(DEVICE)
-
     if DEVICE == "cuda":
         print("Executing CUDA model warmup pass...")
         with torch.no_grad():
             dummy = torch.zeros((1, 3, 1024, 1024), dtype=torch.float16, device="cuda")
             _ = biref_model(dummy)
-
-            dummy_yolo = np.zeros((640, 640, 3), dtype=np.uint8)
-            yolo_model.set_classes(["product", "merchandise"])
-            _ = yolo_model.predict(dummy_yolo, device=DEVICE, half=True, verbose=False)
             torch.cuda.synchronize()
-        print("CUDA Warmup complete. Two-Stage Engine Ready.")
+        print("CUDA Warmup complete. BiRefNet Engine Ready.")
 
     yield
 
     if DEVICE == "cuda":
         torch.cuda.empty_cache()
 
-app = FastAPI(title="Salp Two-Stage GPU Image Processor", lifespan=lifespan)
+app = FastAPI(title="Salp GPU Image Processor", lifespan=lifespan)
 
 # Auth: Supports IMAGE_PROCESSOR_API_KEY or RUNPOD_API_KEY
 IMAGE_PROCESSOR_API_KEY = os.getenv("IMAGE_PROCESSOR_API_KEY", "").strip()
