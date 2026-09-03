@@ -11,6 +11,7 @@ on:
       - 'requirements-gpu.txt'
       - 'scripts/provision_runpod.py'
       - '.github/workflows/deploy-runpod.yml'
+  workflow_dispatch:
 
 concurrency:
   group: runpod-deploy-${{ github.ref }}
@@ -61,7 +62,7 @@ jobs:
           push: true
           tags: ghcr.io/salp-bv/salp-image-processor:${{ steps.env-config.outputs.IMAGE_TAG }}
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: type=gha,mode=min
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -75,5 +76,6 @@ jobs:
         env:
           RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
           IMAGE_PROCESSOR_API_KEY: ${{ secrets.IMAGE_PROCESSOR_API_KEY }}
+          RUNPOD_REGISTRY_AUTH_ID: ${{ secrets.RUNPOD_REGISTRY_AUTH_ID }}
         run: |
           python scripts/provision_runpod.py ${{ steps.env-config.outputs.TARGET_ENV }}
