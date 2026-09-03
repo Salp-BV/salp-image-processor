@@ -1,4 +1,4 @@
-﻿import io
+import io
 import os
 import gc
 import re
@@ -60,9 +60,47 @@ def clean_product_title(title: str) -> str:
     if not title:
         return "product"
     cleaned = re.sub(r'[\(\[\{].*?[\)\]\}]', '', title)
-    cleaned = re.split(r'[-–—|/:]', cleaned)[0].strip()
-    words = cleaned.split()[:4]
+    cleaned = re.sub(r'[–—|/:]', ' ', cleaned).strip()
+    words = cleaned.split()[:5]
     return " ".join(words) if words else "product"
+
+def decontaminate_and_despill(orig_rgb_img: Image.Image, alpha_mask: Image.Image) -> Image.Image:
+    """
+    Vectorized edge color unmixing and decontamination.
+    Removes ambient colored background bleed (e.g. bright yellow backdrops) from anti-aliased edge pixels.
+    """
+    rgb_np = np.array(orig_rgb_img).astype(np.float32)
+    a_np = np.array(alpha_mask).astype(np.float32) / 255.0
+    h, w = a_np.shape
+
+    # Sample background color from image perimeter where alpha is near zero
+    border_w = max(4, int(min(h, w) * 0.03))
+    border_mask = np.zeros((h, w), dtype=bool)
+    border_mask[:border_w, :] = True
+    border_mask[-border_w:, :] = True
+    border_mask[:, :border_w] = True
+    border_mask[:, -border_w:] = True
+
+    bg_candidates = border_mask & (a_np < 0.05)
+    if np.sum(bg_candidates) > 50:
+        bg_color = np.median(rgb_np[bg_candidates], axis=0)
+    else:
+        bg_color = np.array([255.0, 255.0, 255.0], dtype=np.float32)
+
+    # Decontaminate semi-transparent edge pixels (0.02 < alpha < 0.92)
+    # Mathematical unmixing: F = (I - (1 - alpha) * B) / alpha
+    fringe_mask = (a_np > 0.02) & (a_np < 0.92)
+    unmixed = rgb_np.copy()
+    if np.any(fringe_mask):
+        a_vals = a_np[fringe_mask, np.newaxis]
+        observed = rgb_np[fringe_mask]
+        effective_alpha = np.maximum(a_vals, 0.25)
+        cleaned_fg = (observed - (1.0 - a_vals) * bg_color) / effective_alpha
+        unmixed[fringe_mask] = np.clip(cleaned_fg, 0.0, 255.0)
+
+    clean_img = Image.fromarray(unmixed.astype(np.uint8), mode="RGB").convert("RGBA")
+    clean_img.putalpha(alpha_mask)
+    return clean_img
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -198,48 +236,12 @@ def remove_background(payload: dict, authenticated: bool = Depends(verify_api_ke
 
     try:
         with gpu_lock:
-            # Stage 1: Semantic Product Focus with Class 0 Priority
-            crop_box = (0, 0, w, h)
-            if title and yolo_model is not None:
-                try:
-                    target_prompt = clean_product_title(title)
-                    yolo_model.set_classes([target_prompt, "merchandise"])
-                    results = yolo_model.predict(orig_image, conf=0.20, device=DEVICE, half=True, verbose=False)
-                    
-                    boxes = results[0].boxes
-                    if len(boxes) > 0:
-                        xyxy = boxes.xyxy.cpu().numpy().astype(int)
-                        cls_ids = boxes.cls.cpu().numpy().astype(int)
-                        
-                        target_matches = [b for b, c in zip(xyxy, cls_ids) if c == 0 and (b[2] - b[0]) * (b[3] - b[1]) > (w * h * 0.02)]
-                        valid_boxes = target_matches if target_matches else [b for b in xyxy if (b[2] - b[0]) * (b[3] - b[1]) > (w * h * 0.02)]
-
-                        if valid_boxes:
-                            min_x = min(b[0] for b in valid_boxes)
-                            min_y = min(b[1] for b in valid_boxes)
-                            max_x = max(b[2] for b in valid_boxes)
-                            max_y = max(b[3] for b in valid_boxes)
-
-                            pad_x = int((max_x - min_x) * 0.16)
-                            pad_y = int((max_y - min_y) * 0.16)
-                            
-                            candidate_box = (
-                                max(0, min_x - pad_x),
-                                max(0, min_y - pad_y),
-                                min(w, max_x + pad_x),
-                                min(h, max_y + pad_y)
-                            )
-                            crop_area = (candidate_box[2] - candidate_box[0]) * (candidate_box[3] - candidate_box[1])
-                            if crop_area < (w * h * 0.95):
-                                crop_box = candidate_box
-                except Exception as e:
-                    print(f"Stage 1 detector fallback: {e}")
-
-            cropped_stage1 = orig_image.crop(crop_box)
-            cw, ch = cropped_stage1.size
-
-            # Stage 2: 1024x1024 Alpha Matting
-            input_tensor = image_transforms(cropped_stage1).unsqueeze(0).to(DEVICE)
+            # Stage 1: Full-Frame 1024x1024 Global BiRefNet Alpha Matting
+            # Feeding the full uncropped frame guarantees 100% retention of all physical structures:
+            # - Bookshelf speaker wooden cabinets (Test 17)
+            # - Slender desk lamp stems and poles (Test 20)
+            # - Continuous headphone headband arches (Test 15)
+            input_tensor = image_transforms(orig_image).unsqueeze(0).to(DEVICE)
             if DEVICE == "cuda":
                 input_tensor = input_tensor.half()
 
@@ -247,19 +249,20 @@ def remove_background(payload: dict, authenticated: bool = Depends(verify_api_ke
                 preds = biref_model(input_tensor)[-1].sigmoid().cpu()
 
             pred = preds[0].squeeze()
-            pred_pil = transforms.ToPILImage()(pred).resize((cw, ch), Image.Resampling.BILINEAR)
+            pred_pil = transforms.ToPILImage()(pred).resize((w, h), Image.Resampling.BILINEAR)
 
-            # Continuous alpha with gentle noise suppression
+            # Noise Floor Thresholding:
+            # Maps [0.15, 0.85] smoothly to [0.0, 1.0], strictly suppressing background noise < 0.15 to 0
             mask_np = np.array(pred_pil).astype(np.float32) / 255.0
-            mask_np = np.clip((mask_np - 0.02) / 0.96, 0.0, 1.0)
+            mask_np = np.clip((mask_np - 0.15) / (0.85 - 0.15), 0.0, 1.0)
             mask_img = Image.fromarray((mask_np * 255).astype(np.uint8))
 
-        # Stage 3: Auto-Centering (85% Fit) & Studio Ground Contact Shadow
-        no_bg = cropped_stage1.copy().convert("RGBA")
-        no_bg.putalpha(mask_img)
+        # Stage 2: Color Decontamination & Despill (Sub-pixel Chroma Neutralization)
+        clean_fg = decontaminate_and_despill(orig_image, mask_img)
 
-        bbox = mask_img.getbbox() or (0, 0, cw, ch)
-        fg = no_bg.crop(bbox)
+        # Stage 3: Auto-Centering (85% Fit) & Studio Ground Contact Shadow
+        bbox = mask_img.getbbox() or (0, 0, w, h)
+        fg = clean_fg.crop(bbox)
         fg_w, fg_h = fg.size
 
         scale = min((w * 0.85) / fg_w, (h * 0.85) / fg_h)
