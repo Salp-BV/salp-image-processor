@@ -1,0 +1,301 @@
+﻿import io
+import os
+import gc
+import re
+import sys
+import secrets
+import socket
+import ipaddress
+import threading
+from urllib.parse import urlparse
+from contextlib import asynccontextmanager
+
+import torch
+import numpy as np
+from PIL import Image, ImageFilter, ImageDraw
+from torchvision import transforms
+from transformers import AutoModelForImageSegmentation
+from ultralytics import YOLO
+from fastapi import FastAPI, HTTPException, Depends, status, Request
+from fastapi.responses import StreamingResponse
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+import requests
+import sentry_sdk
+
+Image.MAX_IMAGE_PIXELS = 16_000_000
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
+def scrub_sentry_event(event, hint):
+    if "request" in event:
+        headers = event["request"].get("headers", {})
+        if "authorization" in headers:
+            headers["authorization"] = "[SCRUBBED]"
+        if "x-api-key" in headers:
+            headers["x-api-key"] = "[SCRUBBED]"
+    return event
+
+sentry_dsn = os.getenv("SENTRY_DSN")
+if sentry_dsn:
+    sentry_env = os.getenv("APP_ENV", os.getenv("ENVIRONMENT", "production")).lower()
+    traces_rate = 1.0 if sentry_env in ["development", "staging", "stg"] else float(os.getenv("SENTRY_TRACES_SAMPLE_RATE", "0.1"))
+    sentry_sdk.init(
+        dsn=sentry_dsn,
+        environment=sentry_env,
+        traces_sample_rate=traces_rate,
+        before_send=scrub_sentry_event,
+        send_default_pii=False,
+    )
+
+gpu_lock = threading.Lock()
+biref_model = None
+yolo_model = None
+
+image_transforms = transforms.Compose([
+    transforms.Resize((1024, 1024), interpolation=transforms.InterpolationMode.BILINEAR),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+])
+
+def clean_product_title(title: str) -> str:
+    if not title:
+        return "product"
+    cleaned = re.sub(r'[\(\[\{].*?[\)\]\}]', '', title)
+    cleaned = re.split(r'[-–—|/:]', cleaned)[0].strip()
+    words = cleaned.split()[:4]
+    return " ".join(words) if words else "product"
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global biref_model, yolo_model
+    print(f"Initializing Two-Stage GPU Engine on device: {DEVICE}...")
+
+    model_path = os.getenv("MODEL_PATH", "/app/models/birefnet")
+    biref_model = AutoModelForImageSegmentation.from_pretrained(
+        model_path,
+        trust_remote_code=True,
+        torch_dtype=torch.float16 if DEVICE == "cuda" else torch.float32
+    ).to(DEVICE).eval()
+
+    yolo_path = os.getenv("YOLO_MODEL_PATH", "/app/models/yolov8s-worldv2.pt")
+    if not os.path.exists(yolo_path):
+        yolo_path = "yolov8s-worldv2.pt"
+    yolo_model = YOLO(yolo_path)
+    yolo_model.to(DEVICE)
+
+    if DEVICE == "cuda":
+        print("Executing CUDA model warmup pass...")
+        with torch.no_grad():
+            dummy = torch.zeros((1, 3, 1024, 1024), dtype=torch.float16, device="cuda")
+            _ = biref_model(dummy)
+
+            dummy_yolo = np.zeros((640, 640, 3), dtype=np.uint8)
+            yolo_model.set_classes(["product", "merchandise"])
+            _ = yolo_model.predict(dummy_yolo, device=DEVICE, half=True, verbose=False)
+            torch.cuda.synchronize()
+        print("CUDA Warmup complete. Two-Stage Engine Ready.")
+
+    yield
+
+    if DEVICE == "cuda":
+        torch.cuda.empty_cache()
+
+app = FastAPI(title="Salp Two-Stage GPU Image Processor", lifespan=lifespan)
+
+# Auth: Supports IMAGE_PROCESSOR_API_KEY or RUNPOD_API_KEY
+IMAGE_PROCESSOR_API_KEY = os.getenv("IMAGE_PROCESSOR_API_KEY", "").strip()
+RUNPOD_API_KEY = os.getenv("RUNPOD_API_KEY", "").strip()
+security_scheme = HTTPBearer(auto_error=False)
+
+def verify_api_key(request: Request, credentials: HTTPAuthorizationCredentials = Depends(security_scheme)):
+    token = credentials.credentials.strip() if credentials and credentials.credentials else ""
+    if not token:
+        token = request.headers.get("x-api-key", "").strip()
+
+    valid_keys = [k for k in [IMAGE_PROCESSOR_API_KEY, RUNPOD_API_KEY] if k]
+    if not valid_keys:
+        raise HTTPException(status_code=500, detail="API key unconfigured on server.")
+
+    if not token or not any(secrets.compare_digest(token, k) for k in valid_keys):
+        raise HTTPException(status_code=403, detail="Invalid API key.")
+    return True
+
+# SSRF Network Protection
+DISALLOWED_IP_NETWORKS = [
+    ipaddress.ip_network("0.0.0.0/8"), ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("100.64.0.0/10"), ipaddress.ip_network("127.0.0.0/8"),
+    ipaddress.ip_network("169.254.0.0/16"), ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"), ipaddress.ip_network("::1/128"),
+    ipaddress.ip_network("fc00::/7"), ipaddress.ip_network("fe80::/10"),
+]
+
+def fetch_image_securely(image_url: str, max_size_bytes: int = 25 * 1024 * 1024) -> bytes:
+    parsed = urlparse(image_url.strip())
+    if not parsed.hostname:
+        raise HTTPException(status_code=400, detail="Malformed URL: missing hostname.")
+    if parsed.scheme != "https" and os.getenv("ENVIRONMENT") == "production":
+        raise HTTPException(status_code=400, detail="HTTPS scheme strictly required in production.")
+    
+    try:
+        resolved_ip = socket.getaddrinfo(parsed.hostname, None)[0][4][0]
+        ip_obj = ipaddress.ip_address(resolved_ip)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"DNS resolution failed: {str(e)}")
+
+    for net in DISALLOWED_IP_NETWORKS:
+        if ip_obj in net:
+            raise HTTPException(status_code=400, detail="Prohibited private/internal IP address.")
+            
+    resp = requests.get(image_url, stream=True, timeout=(5.0, 15.0))
+    if resp.status_code != 200:
+        raise HTTPException(status_code=400, detail=f"Image download failed: HTTP {resp.status_code}")
+    
+    chunks = []
+    downloaded = 0
+    for chunk in resp.iter_content(chunk_size=65536):
+        if chunk:
+            downloaded += len(chunk)
+            if downloaded > max_size_bytes:
+                raise HTTPException(status_code=413, detail="Payload Too Large: image exceeds 25MB limit.")
+            chunks.append(chunk)
+    return b"".join(chunks)
+
+# Health Probes for RunPod Load Balancer
+@app.get("/ping")
+def ping():
+    """RunPod Load Balancer health check route."""
+    return {"status": "healthy", "device": DEVICE}
+
+@app.get("/health")
+def health():
+    return {
+        "status": "ok",
+        "service": "salp-image-processor-gpu",
+        "pipeline": "two-stage-yolo-and-birefnet",
+        "device": DEVICE,
+        "vram_allocated_mb": round(torch.cuda.memory_allocated(0) / (1024 * 1024), 2) if DEVICE == "cuda" else 0
+    }
+
+@app.post("/remove-background")
+def remove_background(payload: dict, authenticated: bool = Depends(verify_api_key)):
+    image_url = payload.get("image_url")
+    title = payload.get("title", "").strip()
+    min_res = int(payload.get("min_resolution", 800))
+    
+    if not image_url:
+        raise HTTPException(status_code=400, detail="Missing required 'image_url' field.")
+
+    image_bytes = fetch_image_securely(image_url)
+    try:
+        orig_image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    except Image.DecompressionBombError:
+        raise HTTPException(status_code=413, detail="Decompression Bomb: image exceeds security threshold.")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid image: {str(e)}")
+
+    w, h = orig_image.size
+    if w < min_res or h < min_res:
+        raise HTTPException(status_code=422, detail=f"Low resolution source image ({w}x{h}). Minimum: {min_res}px.")
+
+    try:
+        with gpu_lock:
+            # Stage 1: Semantic Product Focus with Class 0 Priority
+            crop_box = (0, 0, w, h)
+            if title and yolo_model is not None:
+                try:
+                    target_prompt = clean_product_title(title)
+                    yolo_model.set_classes([target_prompt, "merchandise"])
+                    results = yolo_model.predict(orig_image, conf=0.20, device=DEVICE, half=True, verbose=False)
+                    
+                    boxes = results[0].boxes
+                    if len(boxes) > 0:
+                        xyxy = boxes.xyxy.cpu().numpy().astype(int)
+                        cls_ids = boxes.cls.cpu().numpy().astype(int)
+                        
+                        target_matches = [b for b, c in zip(xyxy, cls_ids) if c == 0 and (b[2] - b[0]) * (b[3] - b[1]) > (w * h * 0.02)]
+                        valid_boxes = target_matches if target_matches else [b for b in xyxy if (b[2] - b[0]) * (b[3] - b[1]) > (w * h * 0.02)]
+
+                        if valid_boxes:
+                            min_x = min(b[0] for b in valid_boxes)
+                            min_y = min(b[1] for b in valid_boxes)
+                            max_x = max(b[2] for b in valid_boxes)
+                            max_y = max(b[3] for b in valid_boxes)
+
+                            pad_x = int((max_x - min_x) * 0.16)
+                            pad_y = int((max_y - min_y) * 0.16)
+                            
+                            candidate_box = (
+                                max(0, min_x - pad_x),
+                                max(0, min_y - pad_y),
+                                min(w, max_x + pad_x),
+                                min(h, max_y + pad_y)
+                            )
+                            crop_area = (candidate_box[2] - candidate_box[0]) * (candidate_box[3] - candidate_box[1])
+                            if crop_area < (w * h * 0.95):
+                                crop_box = candidate_box
+                except Exception as e:
+                    print(f"Stage 1 detector fallback: {e}")
+
+            cropped_stage1 = orig_image.crop(crop_box)
+            cw, ch = cropped_stage1.size
+
+            # Stage 2: 1024x1024 Alpha Matting
+            input_tensor = image_transforms(cropped_stage1).unsqueeze(0).to(DEVICE)
+            if DEVICE == "cuda":
+                input_tensor = input_tensor.half()
+
+            with torch.no_grad():
+                preds = biref_model(input_tensor)[-1].sigmoid().cpu()
+
+            pred = preds[0].squeeze()
+            pred_pil = transforms.ToPILImage()(pred).resize((cw, ch), Image.Resampling.BILINEAR)
+
+            # Continuous alpha with gentle noise suppression
+            mask_np = np.array(pred_pil).astype(np.float32) / 255.0
+            mask_np = np.clip((mask_np - 0.02) / 0.96, 0.0, 1.0)
+            mask_img = Image.fromarray((mask_np * 255).astype(np.uint8))
+
+        # Stage 3: Auto-Centering (85% Fit) & Studio Ground Contact Shadow
+        no_bg = cropped_stage1.copy().convert("RGBA")
+        no_bg.putalpha(mask_img)
+
+        bbox = mask_img.getbbox() or (0, 0, cw, ch)
+        fg = no_bg.crop(bbox)
+        fg_w, fg_h = fg.size
+
+        scale = min((w * 0.85) / fg_w, (h * 0.85) / fg_h)
+        new_w = max(1, int(fg_w * scale))
+        new_h = max(1, int(fg_h * scale))
+
+        resized_fg = fg.resize((new_w, new_h), Image.Resampling.LANCZOS)
+        paste_x = (w - new_w) // 2
+        paste_y = (h - new_h) // 2
+
+        centered_fg = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        centered_fg.paste(resized_fg, (paste_x, paste_y))
+
+        shadow_layer = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        shadow_w = int(new_w * 0.90)
+        shadow_h = max(8, int(new_h * 0.07))
+        shadow_x = paste_x + (new_w - shadow_w) // 2
+        shadow_y = paste_y + new_h - (shadow_h // 2)
+
+        shadow_draw = ImageDraw.Draw(shadow_layer)
+        shadow_draw.ellipse(
+            [shadow_x, shadow_y, shadow_x + shadow_w, shadow_y + shadow_h],
+            fill=(20, 20, 25, 110)
+        )
+        shadow_layer = shadow_layer.filter(ImageFilter.GaussianBlur(max(4, int(shadow_h * 0.6))))
+
+        final_canvas = Image.new("RGBA", (w, h), (255, 255, 255, 255))
+        final_canvas = Image.alpha_composite(final_canvas, shadow_layer)
+        final_canvas = Image.alpha_composite(final_canvas, centered_fg)
+        final_image = final_canvas.convert("RGB")
+
+        buf = io.BytesIO()
+        final_image.save(buf, format="JPEG", quality=92, optimize=True)
+        buf.seek(0)
+        return StreamingResponse(buf, media_type="image/jpeg")
+
+    except Exception as e:
+        sentry_sdk.capture_exception(e)
+        raise HTTPException(status_code=500, detail=f"GPU processing failed: {str(e)}")
