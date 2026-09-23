@@ -114,6 +114,7 @@ def provision(env_name: str = "staging"):
 
     container_def = {
         "image": image_name,
+        "should_use_cached_image": True,
         "exposed_port": 8080,
         "healthcheck": {
             "enabled": True,
