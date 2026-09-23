@@ -127,8 +127,9 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Salp GPU Image Processor", lifespan=lifespan)
 
-# Auth: Supports IMAGE_PROCESSOR_API_KEY or RUNPOD_API_KEY
+# Auth: Supports IMAGE_PROCESSOR_API_KEY, VERDA_API_KEY, or RUNPOD_API_KEY
 IMAGE_PROCESSOR_API_KEY = os.getenv("IMAGE_PROCESSOR_API_KEY", "").strip()
+VERDA_API_KEY = os.getenv("VERDA_API_KEY", "").strip()
 RUNPOD_API_KEY = os.getenv("RUNPOD_API_KEY", "").strip()
 security_scheme = HTTPBearer(auto_error=False)
 
@@ -137,7 +138,7 @@ def verify_api_key(request: Request, credentials: HTTPAuthorizationCredentials =
     if not token:
         token = request.headers.get("x-api-key", "").strip()
 
-    valid_keys = [k for k in [IMAGE_PROCESSOR_API_KEY, RUNPOD_API_KEY] if k]
+    valid_keys = [k for k in [IMAGE_PROCESSOR_API_KEY, VERDA_API_KEY, RUNPOD_API_KEY] if k]
     if not valid_keys:
         raise HTTPException(status_code=500, detail="API key unconfigured on server.")
 
@@ -185,10 +186,10 @@ def fetch_image_securely(image_url: str, max_size_bytes: int = 25 * 1024 * 1024)
             chunks.append(chunk)
     return b"".join(chunks)
 
-# Health Probes for RunPod Load Balancer
+# Health Probes for Serverless Load Balancers & Gateways
 @app.get("/ping")
 def ping():
-    """RunPod Load Balancer health check route."""
+    """Liveness probe route."""
     return {"status": "healthy", "device": DEVICE}
 
 @app.get("/health")
