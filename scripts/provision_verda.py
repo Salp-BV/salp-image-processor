@@ -91,7 +91,7 @@ def ensure_ghcr_credentials(headers: dict):
 def provision(env_name: str = "staging"):
     is_prod = env_name.lower() in ["prod", "production"]
     deployment_name = "salp-img-production" if is_prod else "salp-img-staging"
-    image_tag = "gpu-main" if is_prod else "gpu-staging"
+    image_tag = os.getenv("IMAGE_TAG", "gpu-staging")
     image_name = f"ghcr.io/salp-bv/salp-image-processor:{image_tag}"
 
     print(f"\n🚀 Initiating Verda Serverless Deployment for '{deployment_name}' ({env_name})...")
