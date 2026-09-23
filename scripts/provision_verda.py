@@ -63,7 +63,7 @@ def get_auth_headers() -> dict:
 
 def ensure_ghcr_credentials(headers: dict):
     cred_name = "ghcr-salp-registry"
-    resp = requests.get(f"{API_BASE}/container-registry-credentials", headers=headers, timeout=15)
+    resp = requests.get(f"{API_BASE}/container-registry-credentials", headers=headers, timeout=45)
     if resp.status_code == 200:
         creds = resp.json()
         if any(c.get("name") == cred_name for c in creds):
@@ -113,6 +113,7 @@ def provision(env_name: str = "staging"):
     ]
 
     container_def = {
+        "name": f"{deployment_name}-0",
         "image": image_name,
         "should_use_cached_image": True,
         "exposed_port": 8080,

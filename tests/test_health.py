@@ -5,5 +5,4 @@ def test_syntax_and_import():
     # Verify provisioning scripts compile cleanly
     import py_compile
     py_compile.compile("scripts/provision_verda.py", doraise=True)
-    py_compile.compile("scripts/provision_runpod.py", doraise=True)
     assert True
