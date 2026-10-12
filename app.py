@@ -382,22 +382,31 @@ def remove_background(payload: dict, authenticated: bool = Depends(verify_api_ke
         cropped_w = max(1, right - left)
         cropped_h = max(1, lower - upper)
 
-        scale = min((w * 0.85) / cropped_w, (h * 0.85) / cropped_h)
-        new_w = int(cropped_w * scale)
-        new_h = int(cropped_h * scale)
+        # Standardize canvas to a 1:1 square matching Storefront aspect-square.
+        # Cap at 2048px to prevent decompression bombs and memory spikes on ultra-high-res photos (e.g. 48MP).
+        # Floor at 1000px to maintain crisp high-definition packshots.
+        raw_dim = max(w, h)
+        canvas_dim = min(2048, max(1000, raw_dim))
+
+        # Proportional scale to fit 85% of square canvas, clamped to max 1.0x to avoid pixelation
+        target_fit = canvas_dim * 0.85
+        scale = min(1.0, target_fit / cropped_w, target_fit / cropped_h)
+        if (cropped_w * scale > target_fit) or (cropped_h * scale > target_fit):
+            scale = min(target_fit / cropped_w, target_fit / cropped_h)
+
+        new_w = max(1, int(cropped_w * scale))
+        new_h = max(1, int(cropped_h * scale))
 
         resized_fg = cropped_fg.resize((new_w, new_h), Image.Resampling.LANCZOS)
-        centered_fg = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-        paste_x = (w - new_w) // 2
-        paste_y = (h - new_h) // 2
-        centered_fg.paste(resized_fg, (paste_x, paste_y))
+        paste_x = (canvas_dim - new_w) // 2
+        paste_y = (canvas_dim - new_h) // 2
 
-        # 8. Contact Shadow Generation
-        shadow_layer = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        # 8. Contact Shadow Generation on canvas_dim x canvas_dim
+        shadow_layer = Image.new("RGBA", (canvas_dim, canvas_dim), (0, 0, 0, 0))
         shadow_w = int(new_w * 0.90)
         shadow_h = max(8, int(new_h * 0.07))
         shadow_x = paste_x + (new_w - shadow_w) // 2
-        shadow_y = paste_y + new_h - (shadow_h // 2)
+        shadow_y = min(canvas_dim - shadow_h - 2, paste_y + new_h - (shadow_h // 2))
 
         shadow_draw = ImageDraw.Draw(shadow_layer)
         shadow_draw.ellipse(
@@ -407,7 +416,10 @@ def remove_background(payload: dict, authenticated: bool = Depends(verify_api_ke
         shadow_layer = shadow_layer.filter(ImageFilter.GaussianBlur(max(4, int(shadow_h * 0.6))))
 
         # 9. Final Studio Composite: Pure White Background + Soft Shadow + Centered Foreground
-        final_canvas = Image.new("RGBA", (w, h), (255, 255, 255, 255))
+        centered_fg = Image.new("RGBA", (canvas_dim, canvas_dim), (0, 0, 0, 0))
+        centered_fg.paste(resized_fg, (paste_x, paste_y))
+
+        final_canvas = Image.new("RGBA", (canvas_dim, canvas_dim), (255, 255, 255, 255))
         final_canvas = Image.alpha_composite(final_canvas, shadow_layer)
         final_canvas = Image.alpha_composite(final_canvas, centered_fg)
         final_image = final_canvas.convert("RGB")
