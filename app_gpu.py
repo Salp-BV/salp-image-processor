@@ -249,27 +249,36 @@ def remove_background(payload: dict, authenticated: bool = Depends(verify_api_ke
         # Stage 2: Color Decontamination & Despill (Sub-pixel Chroma Neutralization)
         clean_fg = decontaminate_and_despill(orig_image, mask_img)
 
-        # Stage 3: Auto-Centering (85% Fit) & Studio Ground Contact Shadow
+        # Stage 3: Auto-Centering (85% Fit on 1:1 Square Canvas) & Studio Ground Contact Shadow
         bbox = mask_img.getbbox() or (0, 0, w, h)
         fg = clean_fg.crop(bbox)
         fg_w, fg_h = fg.size
 
-        scale = min((w * 0.85) / fg_w, (h * 0.85) / fg_h)
+        # Standardize canvas to a 1:1 square matching Storefront aspect-square.
+        # Cap at 2048px to prevent decompression bombs and memory spikes on ultra-high-res photos (e.g. 48MP).
+        # Floor at 1000px to maintain crisp high-definition packshots.
+        raw_dim = max(w, h)
+        canvas_dim = min(2048, max(1000, raw_dim))
+
+        # Proportional scale to fit 85% of square canvas, clamped to max 1.0x to avoid pixelation
+        target_fit = canvas_dim * 0.85
+        scale = min(1.0, target_fit / fg_w, target_fit / fg_h)
+        if (fg_w * scale > target_fit) or (fg_h * scale > target_fit):
+            scale = min(target_fit / fg_w, target_fit / fg_h)
+
         new_w = max(1, int(fg_w * scale))
         new_h = max(1, int(fg_h * scale))
 
         resized_fg = fg.resize((new_w, new_h), Image.Resampling.LANCZOS)
-        paste_x = (w - new_w) // 2
-        paste_y = (h - new_h) // 2
+        paste_x = (canvas_dim - new_w) // 2
+        paste_y = (canvas_dim - new_h) // 2
 
-        centered_fg = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-        centered_fg.paste(resized_fg, (paste_x, paste_y))
-
-        shadow_layer = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        # Ground contact shadow on canvas_dim x canvas_dim
+        shadow_layer = Image.new("RGBA", (canvas_dim, canvas_dim), (0, 0, 0, 0))
         shadow_w = int(new_w * 0.90)
         shadow_h = max(8, int(new_h * 0.07))
         shadow_x = paste_x + (new_w - shadow_w) // 2
-        shadow_y = paste_y + new_h - (shadow_h // 2)
+        shadow_y = min(canvas_dim - shadow_h - 2, paste_y + new_h - (shadow_h // 2))
 
         shadow_draw = ImageDraw.Draw(shadow_layer)
         shadow_draw.ellipse(
@@ -278,7 +287,10 @@ def remove_background(payload: dict, authenticated: bool = Depends(verify_api_ke
         )
         shadow_layer = shadow_layer.filter(ImageFilter.GaussianBlur(max(4, int(shadow_h * 0.6))))
 
-        final_canvas = Image.new("RGBA", (w, h), (255, 255, 255, 255))
+        centered_fg = Image.new("RGBA", (canvas_dim, canvas_dim), (0, 0, 0, 0))
+        centered_fg.paste(resized_fg, (paste_x, paste_y))
+
+        final_canvas = Image.new("RGBA", (canvas_dim, canvas_dim), (255, 255, 255, 255))
         final_canvas = Image.alpha_composite(final_canvas, shadow_layer)
         final_canvas = Image.alpha_composite(final_canvas, centered_fg)
         final_image = final_canvas.convert("RGB")
