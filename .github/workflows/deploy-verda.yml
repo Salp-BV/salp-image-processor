@@ -78,5 +78,6 @@ jobs:
           VERDA_CLIENT_SECRET: ${{ secrets.VERDA_CLIENT_SECRET }}
           IMAGE_PROCESSOR_API_KEY: ${{ secrets.IMAGE_PROCESSOR_API_KEY }}
           GITHUB_PACKAGES_PAT: ${{ secrets.GITHUB_PACKAGES_PAT }}
+          IMAGE_TAG: ${{ steps.env-config.outputs.IMAGE_TAG }}
         run: |
           python scripts/provision_verda.py ${{ steps.env-config.outputs.TARGET_ENV }}
