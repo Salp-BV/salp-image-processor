@@ -1,18 +1,18 @@
 # Agentic Onboarding: Salp Image Processor Microservice
 
-> **Goal**: A high-performance Python FastAPI image background removal and contact shadow processing microservice (BiRefNet ONNX CPU).
+> **Goal**: High-performance Python FastAPI image background removal and studio contact shadow processing microservice powered by **Two-Stage YOLOv8x-seg + BiRefNet PyTorch FP16 CUDA on Verda Serverless NVIDIA L40S GPUs** (`app_gpu.py`, Python 3.11) with edge color decontamination (`decontaminate_and_despill`).
 
 ## 1. Project Identity
 
 - **Stack**:
   - **Framework**: FastAPI (Python 3.11)
   - **ML Engine**:
-    - **GPU (Primary)**: BiRefNet PyTorch FP16 accelerated via CUDA on NVIDIA L40S (`app_gpu.py`, `Dockerfile.gpu`)
-    - **CPU (Fallback)**: ONNX Runtime CPU (`birefnet_general_quantized.onnx`, `app.py`, `Dockerfile`)
-  - **Image Compositing**: PIL (Pillow) & NumPy
-- **Deployment & Architecture (Dual-Tier)**:
-  - **Primary**: Verda Serverless `NVIDIA L40S` GPU (`Dockerfile.gpu`, PyTorch FP16).
-  - **Secondary Fallback**: Coolify PaaS CPU container (`Dockerfile`, ONNX Runtime CPU) on Hetzner Node 1 (`image.salp.shop` / `staging.image.salp.shop`).
+    - **GPU (Primary)**: Two-Stage YOLOv8x-seg + BiRefNet PyTorch FP16 accelerated via CUDA on NVIDIA L40S (`app_gpu.py`, `Dockerfile.gpu`) with sub-pixel chroma neutralization and edge color decontamination (`decontaminate_and_despill`).
+    - **CPU (Cold Standby Fallback)**: Standalone container using Python 3.10-slim-bookworm + `u2net.onnx` (`app.py`, `Dockerfile`).
+  - **Image Processing & Compositing**: PIL (Pillow), NumPy, Torchvision
+- **Deployment & Architecture**:
+  - **Primary**: Verda Serverless `NVIDIA L40S` GPU container deployments (`Dockerfile.gpu`, PyTorch FP16, Scale-to-Zero). Direct endpoints: `https://containers.datacrunch.io/salp-img-production` & `https://containers.datacrunch.io/salp-img-staging`.
+  - **Cold Standby Fallback**: Standalone CPU `Dockerfile` (`u2net.onnx`). Legacy Hetzner Node 1 Coolify PaaS routes (`image.salp.shop` / `staging.image.salp.shop`) are decommissioned in Coolify and DNS in favor of direct Verda serverless GPU endpoints.
 
 ## Git Workflow & Branching Standards
 
@@ -52,7 +52,7 @@ If `git rebase` reports a conflict:
 #### Step 4: Pre-Push Quality Gate
 Before pushing to remote, ensure all checks pass locally:
 ```bash
-pytest
+pytest # or .\.venv\Scripts\pytest on Windows
 ```
 
 #### Step 5: Push and Open PR
@@ -104,10 +104,22 @@ Closes #<issue_number>
 ## 2. Infrastructure & Environment Context
 
 - **Verda Serverless GPU (Primary)**:
-  - Scaled-to-zero serverless GPU container deployments managed via `scripts/provision_verda.py` and GitHub Actions `.github/workflows/deploy-verda.yml`.
-  - Deployment images: `ghcr.io/salp-bv/salp-image-processor:gpu-staging` (staging) and `ghcr.io/salp-bv/salp-image-processor:gpu-main` (production).
-  - Warm cache provisioning: `"should_use_cached_image": True` enabled by default to ensure rapid wake-up (~25s) from scale-to-zero state.
-- **Coolify PaaS CPU (Secondary Fallback)**:
-  - Containerized builds are managed by Coolify on Hetzner Node 1 via GitHub Container Registry (`ghcr.io/salp-bv/salp-image-processor:staging` and `:main`).
-  - Endpoints: `image.salp.shop` (Production) and `staging.image.salp.shop` (Staging).
+  - **Direct Endpoints**: Scaled-to-zero serverless GPU container deployments accessible directly via:
+    - Production: `https://containers.datacrunch.io/salp-img-production`
+    - Staging: `https://containers.datacrunch.io/salp-img-staging`
+  - **Dual-Header Authentication**: Secure zero-trust API gating accepting either:
+    - `Authorization: Bearer <token>`
+    - `X-Api-Key: <token>`
+    - Validated in constant-time via `secrets.compare_digest()` against `IMAGE_PROCESSOR_API_KEY`, `VERDA_API_KEY`, or `RUNPOD_API_KEY`.
+  - **Hardware & Scale-to-Zero Provisioning**: Dedicated NVIDIA L40S GPU per replica (0 to 4 replicas in production, 0 to 2 in staging, scaling down after 300s idle).
+  - **Automated Provisioning**: Managed via `scripts/provision_verda.py` and GitHub Actions `.github/workflows/deploy-verda.yml`. Deployment images: `ghcr.io/salp-bv/salp-image-processor:gpu-main` (production) and `ghcr.io/salp-bv/salp-image-processor:gpu-staging` (staging).
+  - **Warm Cache & Performance SLA**: `"should_use_cached_image": True` enabled by default for rapid wake-up (~25s) from scale-to-zero state. Warm inference latency SLA < 2.5s.
+- **Cold Standby CPU Architecture**:
+  - Standalone CPU `Dockerfile` uses Python 3.10-slim-bookworm + `u2net.onnx` (168MB) as a cold standby fallback image.
+  - Legacy Hetzner Node 1 Coolify PaaS routes (`image.salp.shop` / `staging.image.salp.shop`) are decommissioned in Coolify and DNS in favor of direct Verda serverless GPU endpoints.
+- **Pipeline Architecture & Invariants**:
+  - **Stage 1 (Global Alpha Matting)**: Full-frame 1024x1024 BiRefNet PyTorch FP16 segmentation. Preserves complete physical geometries (wireframes, slender stems, headphone headband arches). Smooth noise floor thresholding maps `[0.15, 0.85]` to `[0.0, 1.0]`.
+  - **Stage 2 (Color Decontamination & Despill)**: Vectorized edge chroma neutralization (`decontaminate_and_despill`). Samples background color from image perimeter where alpha < 0.05, then applies mathematical unmixing `F = (I - (1 - alpha) * B) / alpha` on semi-transparent edge pixels (`0.02 < alpha < 0.92`) to eliminate ambient colored backdrop bleed.
+  - **Stage 3 (Canvas Normalization & Studio Contact Shadow)**: Auto-centers foreground with 85% proportional fit on a 1:1 square canvas (clamped between 1000px and 2048px). Guarantees 100% pure `#FFFFFF` `[255, 255, 255]` perimeter and corner purity. Synthesizes a subtle, soft Gaussian-blurred ground contact shadow directly beneath the base of the object.
 - **Media Output**: Processed image assets are served via Bunny.net CDN (`salp-media-cdn.b-cdn.net`).
+- **Observability**: GlitchTip / Sentry error tracking with automatic PII header scrubbing (`Authorization` and `X-Api-Key` scrubbed before transmission).
