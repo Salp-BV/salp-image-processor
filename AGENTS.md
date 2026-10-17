@@ -6,11 +6,13 @@
 
 - **Stack**:
   - **Framework**: FastAPI (Python 3.11)
-  - **ML Engine**: ONNX Runtime CPU (`birefnet_general_quantized.onnx`)
+  - **ML Engine**:
+    - **GPU (Primary)**: BiRefNet PyTorch FP16 accelerated via CUDA on NVIDIA L40S (`app_gpu.py`, `Dockerfile.gpu`)
+    - **CPU (Fallback)**: ONNX Runtime CPU (`birefnet_general_quantized.onnx`, `app.py`, `Dockerfile`)
   - **Image Compositing**: PIL (Pillow) & NumPy
-- **Deployment**:
-  - **Primary**: Coolify PaaS (Hetzner Node 1) / GitHub Container Registry (`ghcr.io`).
-  - **Secondary Backup**: Google Cloud Run (Europe `europe-west4`).
+- **Deployment & Architecture (Dual-Tier)**:
+  - **Primary**: Verda Serverless `NVIDIA L40S` GPU (`Dockerfile.gpu`, PyTorch FP16).
+  - **Secondary Fallback**: Coolify PaaS CPU container (`Dockerfile`, ONNX Runtime CPU) on Hetzner Node 1 (`image.salp.shop` / `staging.image.salp.shop`).
 
 ## Git Workflow & Branching Standards
 
@@ -101,5 +103,11 @@ Closes #<issue_number>
 
 ## 2. Infrastructure & Environment Context
 
-- **Coolify Deployment**: Containerized builds are managed by Coolify on Hetzner Node 1 via GitHub Container Registry (`ghcr.io/salp-bv/salp-image-processor:staging` and `:main`).
+- **Verda Serverless GPU (Primary)**:
+  - Scaled-to-zero serverless GPU container deployments managed via `scripts/provision_verda.py` and GitHub Actions `.github/workflows/deploy-verda.yml`.
+  - Deployment images: `ghcr.io/salp-bv/salp-image-processor:gpu-staging` (staging) and `ghcr.io/salp-bv/salp-image-processor:gpu-main` (production).
+  - Warm cache provisioning: `"should_use_cached_image": True` enabled by default to ensure rapid wake-up (~25s) from scale-to-zero state.
+- **Coolify PaaS CPU (Secondary Fallback)**:
+  - Containerized builds are managed by Coolify on Hetzner Node 1 via GitHub Container Registry (`ghcr.io/salp-bv/salp-image-processor:staging` and `:main`).
+  - Endpoints: `image.salp.shop` (Production) and `staging.image.salp.shop` (Staging).
 - **Media Output**: Processed image assets are served via Bunny.net CDN (`salp-media-cdn.b-cdn.net`).
