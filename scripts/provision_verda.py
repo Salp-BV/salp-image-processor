@@ -88,6 +88,47 @@ def ensure_ghcr_credentials(headers: dict):
         print(f"Notice: registration response {reg_resp.status_code} - {reg_resp.text}")
     return cred_name
 
+def update_deployment_scaling(deployment_name: str, headers: dict) -> None:
+    """Updates deployment scaling using the dedicated /scaling sub-endpoint."""
+    print(f"⚙️ Updating scaling configuration for '{deployment_name}' via /scaling sub-endpoint...")
+    scaling_payload = {
+        "scaling": {
+            "min_replicas": 0,
+            "max_replicas": 4 if "production" in deployment_name else 2,
+            "scale_down_delay_seconds": 300,
+            "concurrent_requests_per_replica": 4,
+        }
+    }
+    scaling_resp = requests.patch(
+        f"{API_BASE}/container-deployments/{deployment_name}/scaling",
+        headers=headers,
+        json=scaling_payload,
+        timeout=30
+    )
+    if scaling_resp.status_code not in [200, 201, 204]:
+        # Fallback to unwrapped format if sub-endpoint expects flat dictionary
+        flat_payload = {
+            "min_replicas": 0,
+            "max_replicas": 4 if "production" in deployment_name else 2,
+            "scale_down_delay_seconds": 300,
+            "concurrent_requests_per_replica": 4,
+        }
+        fallback_resp = requests.patch(
+            f"{API_BASE}/container-deployments/{deployment_name}/scaling",
+            headers=headers,
+            json=flat_payload,
+            timeout=30
+        )
+        if fallback_resp.status_code not in [200, 201, 204]:
+            raise RuntimeError(
+                f"Failed to update deployment scaling: {scaling_resp.status_code} - {scaling_resp.text} "
+                f"(fallback status: {fallback_resp.status_code} - {fallback_resp.text})"
+            )
+        print("✅ Scaling configuration updated successfully (unwrapped payload).")
+    else:
+        print("✅ Scaling configuration updated successfully.")
+
+
 def provision(env_name: str = "staging"):
     is_prod = env_name.lower() in ["prod", "production"]
     deployment_name = "salp-img-production" if is_prod else "salp-img-staging"
@@ -160,7 +201,6 @@ def provision(env_name: str = "staging"):
                 "name": "L40S",
                 "size": 1
             },
-            "scaling": scaling_def,
             "container_registry_settings": {
                 "is_private": True,
                 "credentials": {
@@ -172,6 +212,8 @@ def provision(env_name: str = "staging"):
         if patch_resp.status_code not in [200, 201, 204]:
             raise RuntimeError(f"Failed to update deployment: {patch_resp.status_code} - {patch_resp.text}")
         print(f"✅ Update submitted successfully.")
+
+        update_deployment_scaling(deployment_name, headers)
     else:
         print(f"✨ Creating new serverless deployment '{deployment_name}' on Verda (L40S GPU, Scale-to-Zero)...")
         create_payload = {
@@ -194,6 +236,8 @@ def provision(env_name: str = "staging"):
         if create_resp.status_code not in [200, 201]:
             raise RuntimeError(f"Failed to create deployment: {create_resp.status_code} - {create_resp.text}")
         print(f"✅ Deployment '{deployment_name}' created successfully.")
+
+        update_deployment_scaling(deployment_name, headers)
 
     # Retrieve endpoint base URL
     print("🌐 Fetching deployment endpoint details...")
