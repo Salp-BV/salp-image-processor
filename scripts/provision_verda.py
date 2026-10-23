@@ -126,6 +126,32 @@ def provision(env_name: str = "staging"):
         "env": env_vars
     }
 
+    scaling_def = {
+        "min_replica_count": 0,
+        "max_replica_count": 4 if is_prod else 2,
+        "scale_down_policy": {
+            "delay_seconds": 300
+        },
+        "scale_up_policy": {
+            "delay_seconds": 10
+        },
+        "queue_message_ttl_seconds": 300,
+        "concurrent_requests_per_replica": 4,
+        "scaling_triggers": {
+            "queue_load": {
+                "threshold": 4
+            },
+            "cpu_utilization": {
+                "enabled": False,
+                "threshold": 80
+            },
+            "gpu_utilization": {
+                "enabled": False,
+                "threshold": 80
+            }
+        }
+    }
+
     if existing:
         print(f"🔄 Updating existing deployment '{deployment_name}' with image '{image_name}'...")
         patch_payload = {
@@ -134,6 +160,7 @@ def provision(env_name: str = "staging"):
                 "name": "L40S",
                 "size": 1
             },
+            "scaling": scaling_def,
             "container_registry_settings": {
                 "is_private": True,
                 "credentials": {
@@ -159,31 +186,7 @@ def provision(env_name: str = "staging"):
                 "name": "L40S",
                 "size": 1
             },
-            "scaling": {
-                "min_replica_count": 0,
-                "max_replica_count": 4 if is_prod else 2,
-                "scale_down_policy": {
-                    "delay_seconds": 300
-                },
-                "scale_up_policy": {
-                    "delay_seconds": 10
-                },
-                "queue_message_ttl_seconds": 300,
-                "concurrent_requests_per_replica": 2,
-                "scaling_triggers": {
-                    "queue_load": {
-                        "threshold": 2
-                    },
-                    "cpu_utilization": {
-                        "enabled": False,
-                        "threshold": 80
-                    },
-                    "gpu_utilization": {
-                        "enabled": False,
-                        "threshold": 80
-                    }
-                }
-            },
+            "scaling": scaling_def,
             "containers": [container_def],
             "is_spot": False
         }
