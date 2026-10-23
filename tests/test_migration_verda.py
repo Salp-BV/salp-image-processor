@@ -18,6 +18,19 @@ VERDA_ENDPOINT = os.getenv("VERDA_ENDPOINT", "https://containers.datacrunch.io/s
 INFERENCE_KEY = os.getenv("VERDA_INFERENCE_API_KEY", "").strip()
 API_KEY = os.getenv("IMAGE_PROCESSOR_API_KEY", os.getenv("RUNPOD_API_KEY", "")).strip()
 
+def _is_verda_responsive() -> bool:
+    try:
+        headers = {"Authorization": f"Bearer {INFERENCE_KEY}"} if INFERENCE_KEY else {}
+        resp = requests.get(f"{VERDA_ENDPOINT}/ping", headers=headers, timeout=5)
+        return resp.status_code == 200
+    except Exception:
+        return False
+
+pytestmark = pytest.mark.skipif(
+    not _is_verda_responsive(),
+    reason=f"Verda GPU cluster ({VERDA_ENDPOINT}) is currently offline or unreachable"
+)
+
 TEST_CASES = [
     {
         "id": "test_01",
