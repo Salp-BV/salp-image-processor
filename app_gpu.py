@@ -19,7 +19,12 @@ from fastapi import FastAPI, HTTPException, Depends, status, Request
 from fastapi.responses import StreamingResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import requests
+import urllib3.util.connection
 import sentry_sdk
+
+# Force IPv4 (AF_INET) resolution for urllib3/requests so container connections to
+# dual-stack CDN hosts (e.g. *.b-cdn.net) never hang on unreachable IPv6 routes.
+urllib3.util.connection.allowed_gai_family = lambda: socket.AF_INET
 
 Image.MAX_IMAGE_PIXELS = 16_000_000
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -163,28 +168,55 @@ def fetch_image_securely(image_url: str, max_size_bytes: int = 25 * 1024 * 1024)
         raise HTTPException(status_code=400, detail="HTTPS scheme strictly required in production.")
     
     try:
-        resolved_ip = socket.getaddrinfo(parsed.hostname, None)[0][4][0]
+        resolved_ip = socket.getaddrinfo(parsed.hostname, None, socket.AF_INET)[0][4][0]
         ip_obj = ipaddress.ip_address(resolved_ip)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"DNS resolution failed: {str(e)}")
 
+    if (
+        ip_obj.is_private
+        or ip_obj.is_loopback
+        or ip_obj.is_link_local
+        or ip_obj.is_multicast
+        or ip_obj.is_reserved
+        or ip_obj.is_unspecified
+    ):
+        raise HTTPException(status_code=400, detail="Prohibited private/internal IP address.")
+
     for net in DISALLOWED_IP_NETWORKS:
         if ip_obj in net:
             raise HTTPException(status_code=400, detail="Prohibited private/internal IP address.")
-            
-    resp = requests.get(image_url, stream=True, timeout=(5.0, 15.0))
-    if resp.status_code != 200:
-        raise HTTPException(status_code=400, detail=f"Image download failed: HTTP {resp.status_code}")
-    
-    chunks = []
-    downloaded = 0
-    for chunk in resp.iter_content(chunk_size=65536):
-        if chunk:
-            downloaded += len(chunk)
-            if downloaded > max_size_bytes:
-                raise HTTPException(status_code=413, detail="Payload Too Large: image exceeds 25MB limit.")
-            chunks.append(chunk)
-    return b"".join(chunks)
+
+    req_headers = {
+        "User-Agent": "Salp-Image-Processor/2.0 (Zero-Trust Security Bot)",
+        "Accept": "image/*,*/*;q=0.8",
+    }
+
+    try:
+        resp = requests.get(
+            image_url,
+            headers=req_headers,
+            stream=True,
+            timeout=(5.0, 15.0),
+        )
+        if resp.status_code != 200:
+            raise HTTPException(status_code=400, detail=f"Image download failed: HTTP {resp.status_code}")
+        
+        chunks = []
+        downloaded = 0
+        for chunk in resp.iter_content(chunk_size=65536):
+            if chunk:
+                downloaded += len(chunk)
+                if downloaded > max_size_bytes:
+                    raise HTTPException(status_code=413, detail="Payload Too Large: image exceeds 25MB limit.")
+                chunks.append(chunk)
+        return b"".join(chunks)
+    except HTTPException:
+        raise
+    except requests.exceptions.Timeout as e:
+        raise HTTPException(status_code=504, detail=f"Image download timed out: {str(e)}")
+    except requests.exceptions.RequestException as e:
+        raise HTTPException(status_code=502, detail=f"Image download failed: {str(e)}")
 
 # Health Probes for Serverless Load Balancers & Gateways
 @app.get("/ping")
