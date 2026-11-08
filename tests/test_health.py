@@ -2,6 +2,8 @@ import sys
 import socket
 import pytest
 import requests
+import numpy as np
+from PIL import Image
 import urllib3.util.connection
 from unittest.mock import patch, MagicMock
 from fastapi import HTTPException
@@ -149,3 +151,90 @@ def test_update_deployment_scaling_fallback():
         assert mock_patch.call_count == 2
         call_json = mock_patch.call_args[1]["json"]
         assert "min_replicas" in call_json
+
+
+def test_detect_and_repair_hand_occlusion_repairs_thumbs_and_removes_wrist():
+    app_gpu = _load_app_gpu()
+    w, h = 800, 800
+    rgb = np.full((h, w, 3), 255, dtype=np.uint8)
+    mask_np = np.zeros((h, w), dtype=np.float32)
+
+    # Dark brown cork journal at x=210..575, y=50..760
+    rgb[50:760, 210:576] = [82, 45, 32]
+    mask_np[50:760, 210:576] = 1.0
+
+    # Horizontal orange elastic strap at y=240..258
+    rgb[240:258, 210:576] = [205, 95, 35]
+
+    # Left thumb (skin color) indenting left edge + dark cast shadow
+    rgb[450:550, 180:255] = [220, 172, 138]
+    rgb[450:550, 255:266] = [30, 18, 12]
+    mask_np[450:550, 210:255] = 0.0  # BiRefNet carved out thumb-bite hole on left
+
+    # Right thumb (skin color) indenting right edge + dark cast shadow
+    rgb[460:560, 530:600] = [222, 175, 140]
+    rgb[460:560, 518:530] = [30, 18, 12]
+    mask_np[460:560, 530:576] = 1.0  # BiRefNet kept right thumb in foreground
+
+    # Floating severed right wrist in foreground mask
+    rgb[520:670, 595:665] = [226, 180, 146]
+    mask_np[520:670, 595:665] = 1.0
+
+    orig_img = Image.fromarray(rgb, mode="RGB")
+    repaired_img, repaired_mask, meta = app_gpu.detect_and_repair_hand_occlusion(orig_img, mask_np)
+
+    assert meta["hand_repaired"] is True
+    assert 0.01 < meta["occlusion_ratio"] < 0.22
+
+    # Floating right wrist must be removed from the mask
+    assert float(np.max(repaired_mask[530:660, 600:660])) < 0.05
+
+    # Left and right journal edges across the thumb-bite rows must be restored in the mask
+    assert float(np.mean(repaired_mask[470:540, 215:570])) > 0.95
+
+    # Skin pixels in the thumb-bite zones must be replaced with dark brown cork texture
+    repaired_np = np.array(repaired_img, dtype=np.float32)
+    assert float(np.mean(repaired_np[470:540, 215:255, 0])) < 115.0
+    assert float(np.mean(repaired_np[470:540, 530:570, 0])) < 115.0
+
+    # Orange elastic strap must be preserved intact
+    assert float(np.mean(repaired_np[244:254, 220:565, 0])) > 190.0
+
+
+def test_detect_and_repair_hand_occlusion_clean_product_untouched():
+    app_gpu = _load_app_gpu()
+    w, h = 800, 800
+    rgb = np.full((h, w, 3), 255, dtype=np.uint8)
+    mask_np = np.zeros((h, w), dtype=np.float32)
+
+    # Clean unobstructed brown cork journal
+    rgb[60:740, 220:580] = [85, 48, 34]
+    rgb[230:248, 220:580] = [205, 95, 35]
+    mask_np[60:740, 220:580] = 1.0
+
+    orig_img = Image.fromarray(rgb, mode="RGB")
+    repaired_img, repaired_mask, meta = app_gpu.detect_and_repair_hand_occlusion(orig_img, mask_np)
+
+    assert meta["hand_repaired"] is False
+    assert meta["occlusion_ratio"] == 0.0
+    assert repaired_img is orig_img
+    assert np.array_equal(repaired_mask, mask_np)
+
+
+def test_detect_and_repair_hand_occlusion_heavy_occlusion_raises_422():
+    app_gpu = _load_app_gpu()
+    w, h = 800, 800
+    rgb = np.full((h, w, 3), 255, dtype=np.uint8)
+    mask_np = np.zeros((h, w), dtype=np.float32)
+
+    # Product with >= 25% human skin/body occlusion
+    rgb[100:700, 200:600] = [60, 45, 35]
+    mask_np[100:700, 200:600] = 1.0
+    rgb[450:700, 200:600] = [220, 172, 138]
+
+    orig_img = Image.fromarray(rgb, mode="RGB")
+    with pytest.raises(HTTPException) as exc_info:
+        app_gpu.detect_and_repair_hand_occlusion(orig_img, mask_np)
+
+    assert exc_info.value.status_code == 422
+    assert "HUMAN_OR_PROP_OCCLUSION_DETECTED" in exc_info.value.detail
