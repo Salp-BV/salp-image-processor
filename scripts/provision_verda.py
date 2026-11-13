@@ -39,18 +39,19 @@ VERDA_CLIENT_SECRET = os.getenv("VERDA_CLIENT_SECRET", "").strip()
 IMAGE_PROCESSOR_API_KEY = os.getenv("IMAGE_PROCESSOR_API_KEY", os.getenv("RUNPOD_API_KEY", "")).strip()
 GITHUB_PACKAGES_PAT = os.getenv("GITHUB_PACKAGES_PAT", "").strip()
 
-if not VERDA_CLIENT_ID or not VERDA_CLIENT_SECRET:
-    print("❌ Error: VERDA_CLIENT_ID or VERDA_CLIENT_SECRET is not configured.")
-    sys.exit(1)
-
 API_BASE = "https://api.verda.com/v1"
 
 def get_auth_headers() -> dict:
+    client_id = os.getenv("VERDA_CLIENT_ID", VERDA_CLIENT_ID).strip()
+    client_secret = os.getenv("VERDA_CLIENT_SECRET", VERDA_CLIENT_SECRET).strip()
+    if not client_id or not client_secret:
+        raise RuntimeError("VERDA_CLIENT_ID or VERDA_CLIENT_SECRET is not configured.")
+
     token_url = f"{API_BASE}/oauth2/token"
     payload = {
         "grant_type": "client_credentials",
-        "client_id": VERDA_CLIENT_ID,
-        "client_secret": VERDA_CLIENT_SECRET
+        "client_id": client_id,
+        "client_secret": client_secret
     }
     resp = requests.post(token_url, json=payload, timeout=20)
     if resp.status_code != 200:
@@ -254,7 +255,7 @@ def provision(env_name: str = "staging"):
         time.sleep(3)
 
     if not endpoint_url:
-        endpoint_url = f"https://containers.verda.com/{deployment_name}"
+        endpoint_url = f"https://containers.datacrunch.io/{deployment_name}"
 
     clean_base = endpoint_url.rstrip("/")
     remove_bg_url = f"{clean_base}/remove-background"
