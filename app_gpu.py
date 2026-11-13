@@ -211,6 +211,13 @@ def detect_and_repair_hand_occlusion(
         + np.sum(solid_skin[:, -border_pad:])
     )
 
+    # Reject lifestyle photos where arms/hands reach frame borders with substantial foreground skin
+    if not allow_heavy_occlusion and border_skin >= max(150, int(w * 0.25)) and fg_skin_ratio >= 0.08:
+        raise HTTPException(
+            status_code=422,
+            detail="HUMAN_OR_PROP_OCCLUSION_DETECTED: Foreground is heavily occluded by human body parts or props (>=22%).",
+        )
+
     # If the product interior itself is bright/tan (core_all_p90_r >= 142 and no border hands or significant fg skin),
     # do not misclassify light cork/wood grain as hands.
     if core_all_p90_r >= 142.0 and core_all_p90_g >= 90.0 and fg_skin_ratio < 0.02 and border_skin < (w * 0.25):
@@ -288,15 +295,16 @@ def detect_and_repair_hand_occlusion(
     full_span_h = max(prod_h, y1 - y0 + 1)
     est_prod_area = float(max(1, prod_w * full_span_h))
     skin_inside_prod_cols = int(np.sum(solid_skin[y0:y1 + 1, med_xl:med_xr + 1] & fg_mask[y0:y1 + 1, med_xl:med_xr + 1]))
+    actual_skin_occlusion = max(fg_skin_ratio, skin_inside_prod_cols / est_prod_area)
 
-    # Check for Heavy Occlusion (>= 22% of the product's own silhouette is covered by human skin/body)
-    if (skin_inside_prod_cols / est_prod_area) >= 0.22 and prod_p90_r < 140.0:
+    # Check for Heavy Occlusion (>= 22% of foreground or product silhouette is actual human skin/body)
+    if actual_skin_occlusion >= 0.22 and prod_p90_r < 140.0:
         if not allow_heavy_occlusion:
             raise HTTPException(
                 status_code=422,
                 detail="HUMAN_OR_PROP_OCCLUSION_DETECTED: Foreground is heavily occluded by human body parts or props (>=22%).",
             )
-        return orig_image, mask_np, {"hand_repaired": False, "occlusion_ratio": float(skin_inside_prod_cols / est_prod_area)}
+        return orig_image, mask_np, {"hand_repaired": False, "occlusion_ratio": float(round(actual_skin_occlusion, 4))}
 
     corner_margin = max(2, int(prod_h * 0.025))
     is_cast_shadow = lum < 48.0
@@ -335,14 +343,20 @@ def detect_and_repair_hand_occlusion(
             skin_in_indent_pixels += int(np.sum(solid_skin[y, min_x:min(w, xr + 25)]))
 
     inpaint_area = int(np.sum(inpaint_mask))
+    skin_density_in_indent = skin_in_indent_pixels / float(max(1, inpaint_area))
     occlusion_ratio = max(inpaint_area, skin_inside_prod_cols) / est_prod_area
 
-    # Require actual skin presence in/around the indentation or foreground mask so clean products are untouched
-    has_hand_evidence = (skin_in_indent_pixels > max(25, int(est_prod_area * 0.002))) or (fg_skin_ratio >= 0.008)
-    if not has_hand_evidence or (inpaint_area == 0 and fg_skin_ratio < 0.008):
+    # Require concentrated skin inside/adjacent to the indentation so curved bags, coiled belts,
+    # and open wallets with minor warm accents are never falsely repaired or 422-rejected.
+    has_hand_evidence = (
+        inpaint_area > 0
+        and skin_in_indent_pixels > max(25, int(est_prod_area * 0.002))
+        and skin_density_in_indent >= 0.22
+    )
+    if not has_hand_evidence:
         return orig_image, mask_np, {"hand_repaired": False, "occlusion_ratio": 0.0}
 
-    if occlusion_ratio >= 0.22 and not allow_heavy_occlusion:
+    if actual_skin_occlusion >= 0.22 and not allow_heavy_occlusion:
         raise HTTPException(
             status_code=422,
             detail="HUMAN_OR_PROP_OCCLUSION_DETECTED: Foreground is heavily occluded by human body parts or props (>=22%).",

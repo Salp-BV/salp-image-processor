@@ -247,6 +247,53 @@ def test_detect_and_repair_hand_occlusion_heavy_occlusion_raises_422():
     assert "HUMAN_OR_PROP_OCCLUSION_DETECTED" in exc_info.value.detail
 
 
+def test_detect_and_repair_hand_occlusion_tapered_product_with_minor_flecks_untouched():
+    app_gpu = _load_app_gpu()
+    w, h = 800, 800
+    rgb = np.full((h, w, 3), 255, dtype=np.uint8)
+    mask_np = np.zeros((h, w), dtype=np.float32)
+
+    # Dark brown bag/wallet wide across upper 6%-35%, tapering inward by >25% below y=300
+    rgb[80:300, 180:620] = [78, 46, 33]
+    mask_np[80:300, 180:620] = 1.0
+    rgb[300:700, 270:530] = [78, 46, 33]
+    mask_np[300:700, 270:530] = 1.0
+
+    # Minor tan/gold buckle accent (small warm patch, far below concentrated hand-in-indent threshold)
+    rgb[360:395, 380:420] = [215, 168, 128]
+
+    orig_img = Image.fromarray(rgb, mode="RGB")
+    repaired_img, repaired_mask, meta = app_gpu.detect_and_repair_hand_occlusion(orig_img, mask_np)
+
+    assert meta["hand_repaired"] is False
+    assert meta["occlusion_ratio"] == 0.0
+    assert repaired_img is orig_img
+    assert np.array_equal(repaired_mask, mask_np)
+
+
+def test_detect_and_repair_hand_occlusion_lifestyle_border_hands_raises_422():
+    app_gpu = _load_app_gpu()
+    w, h = 800, 800
+    rgb = np.full((h, w, 3), 255, dtype=np.uint8)
+    mask_np = np.zeros((h, w), dtype=np.float32)
+
+    # Cork product in center (core_all_p90_r >= 142) with arms/hands extending to left & right frame borders
+    rgb[160:640, 200:600] = [95, 58, 42]
+    rgb[340:420, 260:540] = [155, 118, 88]
+    mask_np[160:640, 200:600] = 1.0
+    rgb[320:480, 0:220] = [225, 180, 146]
+    mask_np[320:480, 0:220] = 1.0
+    rgb[320:480, 580:800] = [225, 180, 146]
+    mask_np[320:480, 580:800] = 1.0
+
+    orig_img = Image.fromarray(rgb, mode="RGB")
+    with pytest.raises(HTTPException) as exc_info:
+        app_gpu.detect_and_repair_hand_occlusion(orig_img, mask_np)
+
+    assert exc_info.value.status_code == 422
+    assert "HUMAN_OR_PROP_OCCLUSION_DETECTED" in exc_info.value.detail
+
+
 def test_get_auth_headers_requires_verda_credentials(monkeypatch):
     import scripts.provision_verda as pv
     monkeypatch.delenv("VERDA_CLIENT_ID", raising=False)
