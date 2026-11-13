@@ -130,6 +130,47 @@ def update_deployment_scaling(deployment_name: str, headers: dict) -> None:
         print("✅ Scaling configuration updated successfully.")
 
 
+PREFERRED_COMPUTE_TYPES = ("L40S", "RTX PRO 6000", "H100", "H200", "B200", "B300")
+
+
+def select_available_compute(
+    headers: dict,
+    preferred_types: tuple[str, ...] = PREFERRED_COMPUTE_TYPES,
+    size: int = 1,
+) -> dict:
+    """Selects the first cost-optimal GPU compute tier currently available on Verda Serverless."""
+    fallback = {"name": preferred_types[0], "size": size}
+    try:
+        resp = requests.get(
+            f"{API_BASE}/serverless-compute-resources",
+            headers=headers,
+            timeout=20,
+        )
+        if resp.status_code != 200:
+            print(f"⚠️ Could not query Verda compute availability ({resp.status_code}); defaulting to {fallback['name']}.")
+            return fallback
+
+        resources = resp.json() or []
+        available = {
+            (str(r.get("name", "")).strip(), r.get("size"))
+            for r in resources
+            if r.get("is_available")
+        }
+        for gpu_name in preferred_types:
+            if (gpu_name, size) in available:
+                if gpu_name != preferred_types[0]:
+                    print(f"⚠️ Preferred GPU '{preferred_types[0]}' unavailable; automatically selecting '{gpu_name}' (size={size}).")
+                else:
+                    print(f"✅ Selected GPU compute '{gpu_name}' (size={size}).")
+                return {"name": gpu_name, "size": size}
+
+        print(f"⚠️ None of {preferred_types} reported available (size={size}); falling back to {fallback['name']}.")
+        return fallback
+    except Exception as exc:
+        print(f"⚠️ Compute availability check failed ({exc}); defaulting to {fallback['name']}.")
+        return fallback
+
+
 def ensure_deployment_resumed(deployment_name: str, headers: dict) -> None:
     """Automatically resumes a paused Verda deployment (e.g. after billing balance top-up)."""
     status_resp = requests.get(
@@ -222,14 +263,13 @@ def provision(env_name: str = "staging"):
         }
     }
 
+    selected_compute = select_available_compute(headers, size=1)
+
     if existing:
         print(f"🔄 Updating existing deployment '{deployment_name}' with image '{image_name}'...")
         patch_payload = {
             "containers": [container_def],
-            "compute": {
-                "name": "L40S",
-                "size": 1
-            },
+            "compute": selected_compute,
             "container_registry_settings": {
                 "is_private": True,
                 "credentials": {
@@ -245,7 +285,7 @@ def provision(env_name: str = "staging"):
         update_deployment_scaling(deployment_name, headers)
         ensure_deployment_resumed(deployment_name, headers)
     else:
-        print(f"✨ Creating new serverless deployment '{deployment_name}' on Verda (L40S GPU, Scale-to-Zero)...")
+        print(f"✨ Creating new serverless deployment '{deployment_name}' on Verda ({selected_compute['name']} GPU, Scale-to-Zero)...")
         create_payload = {
             "name": deployment_name,
             "container_registry_settings": {
@@ -254,10 +294,7 @@ def provision(env_name: str = "staging"):
                     "name": cred_name
                 }
             },
-            "compute": {
-                "name": "L40S",
-                "size": 1
-            },
+            "compute": selected_compute,
             "scaling": scaling_def,
             "containers": [container_def],
             "is_spot": False

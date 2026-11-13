@@ -1,5 +1,5 @@
 # Stage 1: Dependency Builder & Weight Baker
-FROM nvidia/cuda:12.4.1-base-ubuntu22.04 AS builder
+FROM nvidia/cuda:12.8.1-base-ubuntu22.04 AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
@@ -39,7 +39,7 @@ RUN mkdir -p /app/models /app/.cache && \
     snapshot_download(repo_id='ZhengPeng7/BiRefNet', local_dir='/app/models/birefnet', local_dir_use_symlinks=False)"
 
 # Stage 2: Hardened Rootless Runtime
-FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04 AS runner
+FROM nvidia/cuda:12.8.1-runtime-ubuntu22.04 AS runner
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
