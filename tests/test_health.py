@@ -8,7 +8,13 @@ import urllib3.util.connection
 from unittest.mock import patch, MagicMock
 from fastapi import HTTPException
 
-from scripts.provision_verda import update_deployment_scaling, get_auth_headers, provision, API_BASE
+from scripts.provision_verda import (
+    update_deployment_scaling,
+    ensure_deployment_resumed,
+    get_auth_headers,
+    provision,
+    API_BASE,
+)
 
 _APP_GPU_MODULE = None
 
@@ -262,6 +268,7 @@ def test_provision_fallback_uses_datacrunch_domain(env_name, expected_deployment
     with patch("scripts.provision_verda.get_auth_headers", return_value={"Authorization": "Bearer tok"}), \
          patch("scripts.provision_verda.ensure_ghcr_credentials", return_value="ghcr-salp-registry"), \
          patch("scripts.provision_verda.update_deployment_scaling"), \
+         patch("scripts.provision_verda.ensure_deployment_resumed"), \
          patch("scripts.provision_verda.time.sleep"), \
          patch("requests.get") as mock_get, \
          patch("requests.patch") as mock_patch:
@@ -276,3 +283,31 @@ def test_provision_fallback_uses_datacrunch_domain(env_name, expected_deployment
 
         result = provision(env_name)
         assert result == f"https://containers.datacrunch.io/{expected_deployment}/remove-background"
+
+
+def test_ensure_deployment_resumed_resumes_paused_deployment():
+    with patch("requests.get") as mock_get, patch("requests.post") as mock_post:
+        mock_get.return_value = MagicMock(status_code=200, json=lambda: {"status": "paused"})
+        mock_post.return_value = MagicMock(status_code=200, text="resumed")
+
+        ensure_deployment_resumed("salp-img-staging", {"Authorization": "Bearer tok"})
+
+        mock_get.assert_called_once_with(
+            f"{API_BASE}/container-deployments/salp-img-staging/status",
+            headers={"Authorization": "Bearer tok"},
+            timeout=20,
+        )
+        mock_post.assert_called_once_with(
+            f"{API_BASE}/container-deployments/salp-img-staging/resume",
+            headers={"Authorization": "Bearer tok"},
+            timeout=30,
+        )
+
+
+def test_ensure_deployment_resumed_noop_when_active():
+    with patch("requests.get") as mock_get, patch("requests.post") as mock_post:
+        mock_get.return_value = MagicMock(status_code=200, json=lambda: {"status": "healthy"})
+
+        ensure_deployment_resumed("salp-img-staging", {"Authorization": "Bearer tok"})
+
+        mock_post.assert_not_called()
