@@ -130,6 +130,34 @@ def update_deployment_scaling(deployment_name: str, headers: dict) -> None:
         print("✅ Scaling configuration updated successfully.")
 
 
+def ensure_deployment_resumed(deployment_name: str, headers: dict) -> None:
+    """Automatically resumes a paused Verda deployment (e.g. after billing balance top-up)."""
+    status_resp = requests.get(
+        f"{API_BASE}/container-deployments/{deployment_name}/status",
+        headers=headers,
+        timeout=20,
+    )
+    if status_resp.status_code != 200:
+        return
+
+    current_status = str((status_resp.json() or {}).get("status", "")).strip().lower()
+    if current_status != "paused":
+        return
+
+    print(f"▶️ Deployment '{deployment_name}' is paused. Resuming via /resume...")
+    resume_resp = requests.post(
+        f"{API_BASE}/container-deployments/{deployment_name}/resume",
+        headers=headers,
+        timeout=30,
+    )
+    if resume_resp.status_code not in [200, 201, 202, 204]:
+        raise RuntimeError(
+            f"Failed to resume paused deployment '{deployment_name}': "
+            f"{resume_resp.status_code} - {resume_resp.text}"
+        )
+    print(f"✅ Resumed paused deployment '{deployment_name}'.")
+
+
 def provision(env_name: str = "staging"):
     is_prod = env_name.lower() in ["prod", "production"]
     deployment_name = "salp-img-production" if is_prod else "salp-img-staging"
@@ -215,6 +243,7 @@ def provision(env_name: str = "staging"):
         print(f"✅ Update submitted successfully.")
 
         update_deployment_scaling(deployment_name, headers)
+        ensure_deployment_resumed(deployment_name, headers)
     else:
         print(f"✨ Creating new serverless deployment '{deployment_name}' on Verda (L40S GPU, Scale-to-Zero)...")
         create_payload = {
@@ -239,6 +268,7 @@ def provision(env_name: str = "staging"):
         print(f"✅ Deployment '{deployment_name}' created successfully.")
 
         update_deployment_scaling(deployment_name, headers)
+        ensure_deployment_resumed(deployment_name, headers)
 
     # Retrieve endpoint base URL
     print("🌐 Fetching deployment endpoint details...")
