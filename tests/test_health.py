@@ -8,7 +8,14 @@ import urllib3.util.connection
 from unittest.mock import patch, MagicMock
 from fastapi import HTTPException
 
-from scripts.provision_verda import update_deployment_scaling, API_BASE
+from scripts.provision_verda import (
+    update_deployment_scaling,
+    ensure_deployment_resumed,
+    select_available_compute,
+    get_auth_headers,
+    provision,
+    API_BASE,
+)
 
 _APP_GPU_MODULE = None
 
@@ -238,3 +245,101 @@ def test_detect_and_repair_hand_occlusion_heavy_occlusion_raises_422():
 
     assert exc_info.value.status_code == 422
     assert "HUMAN_OR_PROP_OCCLUSION_DETECTED" in exc_info.value.detail
+
+
+def test_get_auth_headers_requires_verda_credentials(monkeypatch):
+    import scripts.provision_verda as pv
+    monkeypatch.delenv("VERDA_CLIENT_ID", raising=False)
+    monkeypatch.delenv("VERDA_CLIENT_SECRET", raising=False)
+    monkeypatch.setattr(pv, "VERDA_CLIENT_ID", "")
+    monkeypatch.setattr(pv, "VERDA_CLIENT_SECRET", "")
+
+    with pytest.raises(RuntimeError, match="VERDA_CLIENT_ID or VERDA_CLIENT_SECRET is not configured"):
+        get_auth_headers()
+
+
+@pytest.mark.parametrize(
+    ("env_name", "expected_deployment"),
+    [
+        ("staging", "salp-img-staging"),
+        ("production", "salp-img-production"),
+    ],
+)
+def test_provision_fallback_uses_datacrunch_domain(env_name, expected_deployment):
+    with patch("scripts.provision_verda.get_auth_headers", return_value={"Authorization": "Bearer tok"}), \
+         patch("scripts.provision_verda.ensure_ghcr_credentials", return_value="ghcr-salp-registry"), \
+         patch("scripts.provision_verda.select_available_compute", return_value={"name": "RTX PRO 6000", "size": 1}), \
+         patch("scripts.provision_verda.update_deployment_scaling"), \
+         patch("scripts.provision_verda.ensure_deployment_resumed"), \
+         patch("scripts.provision_verda.time.sleep"), \
+         patch("requests.get") as mock_get, \
+         patch("requests.patch") as mock_patch:
+        list_resp = MagicMock(status_code=200)
+        list_resp.json.return_value = [{"name": expected_deployment}]
+        detail_resp = MagicMock(status_code=200)
+        detail_resp.json.return_value = {"status": "provisioning", "endpoint_base_url": None}
+        mock_get.side_effect = [list_resp] + [detail_resp] * 12
+
+        patch_resp = MagicMock(status_code=200)
+        mock_patch.return_value = patch_resp
+
+        result = provision(env_name)
+        assert result == f"https://containers.datacrunch.io/{expected_deployment}/remove-background"
+
+
+def test_ensure_deployment_resumed_resumes_paused_deployment():
+    with patch("requests.get") as mock_get, patch("requests.post") as mock_post:
+        mock_get.return_value = MagicMock(status_code=200, json=lambda: {"status": "paused"})
+        mock_post.return_value = MagicMock(status_code=200, text="resumed")
+
+        ensure_deployment_resumed("salp-img-staging", {"Authorization": "Bearer tok"})
+
+        mock_get.assert_called_once_with(
+            f"{API_BASE}/container-deployments/salp-img-staging/status",
+            headers={"Authorization": "Bearer tok"},
+            timeout=20,
+        )
+        mock_post.assert_called_once_with(
+            f"{API_BASE}/container-deployments/salp-img-staging/resume",
+            headers={"Authorization": "Bearer tok"},
+            timeout=30,
+        )
+
+
+def test_ensure_deployment_resumed_noop_when_active():
+    with patch("requests.get") as mock_get, patch("requests.post") as mock_post:
+        mock_get.return_value = MagicMock(status_code=200, json=lambda: {"status": "healthy"})
+
+        ensure_deployment_resumed("salp-img-staging", {"Authorization": "Bearer tok"})
+
+        mock_post.assert_not_called()
+
+
+def test_select_available_compute_prefers_l40s_when_available():
+    with patch("requests.get") as mock_get:
+        mock_get.return_value = MagicMock(
+            status_code=200,
+            json=lambda: [
+                {"name": "L40S", "size": 1, "is_available": True},
+                {"name": "RTX PRO 6000", "size": 1, "is_available": True},
+            ],
+        )
+        assert select_available_compute({"Authorization": "Bearer tok"}) == {"name": "L40S", "size": 1}
+
+
+def test_select_available_compute_falls_back_when_l40s_unavailable():
+    with patch("requests.get") as mock_get:
+        mock_get.return_value = MagicMock(
+            status_code=200,
+            json=lambda: [
+                {"name": "L40S", "size": 1, "is_available": False},
+                {"name": "RTX PRO 6000", "size": 1, "is_available": True},
+                {"name": "H100", "size": 1, "is_available": True},
+            ],
+        )
+        assert select_available_compute({"Authorization": "Bearer tok"}) == {"name": "RTX PRO 6000", "size": 1}
+
+
+def test_select_available_compute_defaults_on_error():
+    with patch("requests.get", side_effect=requests.RequestException("boom")):
+        assert select_available_compute({"Authorization": "Bearer tok"}) == {"name": "L40S", "size": 1}

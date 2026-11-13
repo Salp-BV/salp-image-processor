@@ -39,18 +39,19 @@ VERDA_CLIENT_SECRET = os.getenv("VERDA_CLIENT_SECRET", "").strip()
 IMAGE_PROCESSOR_API_KEY = os.getenv("IMAGE_PROCESSOR_API_KEY", os.getenv("RUNPOD_API_KEY", "")).strip()
 GITHUB_PACKAGES_PAT = os.getenv("GITHUB_PACKAGES_PAT", "").strip()
 
-if not VERDA_CLIENT_ID or not VERDA_CLIENT_SECRET:
-    print("❌ Error: VERDA_CLIENT_ID or VERDA_CLIENT_SECRET is not configured.")
-    sys.exit(1)
-
 API_BASE = "https://api.verda.com/v1"
 
 def get_auth_headers() -> dict:
+    client_id = os.getenv("VERDA_CLIENT_ID", VERDA_CLIENT_ID).strip()
+    client_secret = os.getenv("VERDA_CLIENT_SECRET", VERDA_CLIENT_SECRET).strip()
+    if not client_id or not client_secret:
+        raise RuntimeError("VERDA_CLIENT_ID or VERDA_CLIENT_SECRET is not configured.")
+
     token_url = f"{API_BASE}/oauth2/token"
     payload = {
         "grant_type": "client_credentials",
-        "client_id": VERDA_CLIENT_ID,
-        "client_secret": VERDA_CLIENT_SECRET
+        "client_id": client_id,
+        "client_secret": client_secret
     }
     resp = requests.post(token_url, json=payload, timeout=20)
     if resp.status_code != 200:
@@ -129,6 +130,75 @@ def update_deployment_scaling(deployment_name: str, headers: dict) -> None:
         print("✅ Scaling configuration updated successfully.")
 
 
+PREFERRED_COMPUTE_TYPES = ("L40S", "RTX PRO 6000", "H100", "H200", "B200", "B300")
+
+
+def select_available_compute(
+    headers: dict,
+    preferred_types: tuple[str, ...] = PREFERRED_COMPUTE_TYPES,
+    size: int = 1,
+) -> dict:
+    """Selects the first cost-optimal GPU compute tier currently available on Verda Serverless."""
+    fallback = {"name": preferred_types[0], "size": size}
+    try:
+        resp = requests.get(
+            f"{API_BASE}/serverless-compute-resources",
+            headers=headers,
+            timeout=20,
+        )
+        if resp.status_code != 200:
+            print(f"⚠️ Could not query Verda compute availability ({resp.status_code}); defaulting to {fallback['name']}.")
+            return fallback
+
+        resources = resp.json() or []
+        available = {
+            (str(r.get("name", "")).strip(), r.get("size"))
+            for r in resources
+            if r.get("is_available")
+        }
+        for gpu_name in preferred_types:
+            if (gpu_name, size) in available:
+                if gpu_name != preferred_types[0]:
+                    print(f"⚠️ Preferred GPU '{preferred_types[0]}' unavailable; automatically selecting '{gpu_name}' (size={size}).")
+                else:
+                    print(f"✅ Selected GPU compute '{gpu_name}' (size={size}).")
+                return {"name": gpu_name, "size": size}
+
+        print(f"⚠️ None of {preferred_types} reported available (size={size}); falling back to {fallback['name']}.")
+        return fallback
+    except Exception as exc:
+        print(f"⚠️ Compute availability check failed ({exc}); defaulting to {fallback['name']}.")
+        return fallback
+
+
+def ensure_deployment_resumed(deployment_name: str, headers: dict) -> None:
+    """Automatically resumes a paused Verda deployment (e.g. after billing balance top-up)."""
+    status_resp = requests.get(
+        f"{API_BASE}/container-deployments/{deployment_name}/status",
+        headers=headers,
+        timeout=20,
+    )
+    if status_resp.status_code != 200:
+        return
+
+    current_status = str((status_resp.json() or {}).get("status", "")).strip().lower()
+    if current_status != "paused":
+        return
+
+    print(f"▶️ Deployment '{deployment_name}' is paused. Resuming via /resume...")
+    resume_resp = requests.post(
+        f"{API_BASE}/container-deployments/{deployment_name}/resume",
+        headers=headers,
+        timeout=30,
+    )
+    if resume_resp.status_code not in [200, 201, 202, 204]:
+        raise RuntimeError(
+            f"Failed to resume paused deployment '{deployment_name}': "
+            f"{resume_resp.status_code} - {resume_resp.text}"
+        )
+    print(f"✅ Resumed paused deployment '{deployment_name}'.")
+
+
 def provision(env_name: str = "staging"):
     is_prod = env_name.lower() in ["prod", "production"]
     deployment_name = "salp-img-production" if is_prod else "salp-img-staging"
@@ -193,14 +263,13 @@ def provision(env_name: str = "staging"):
         }
     }
 
+    selected_compute = select_available_compute(headers, size=1)
+
     if existing:
         print(f"🔄 Updating existing deployment '{deployment_name}' with image '{image_name}'...")
         patch_payload = {
             "containers": [container_def],
-            "compute": {
-                "name": "L40S",
-                "size": 1
-            },
+            "compute": selected_compute,
             "container_registry_settings": {
                 "is_private": True,
                 "credentials": {
@@ -214,8 +283,9 @@ def provision(env_name: str = "staging"):
         print(f"✅ Update submitted successfully.")
 
         update_deployment_scaling(deployment_name, headers)
+        ensure_deployment_resumed(deployment_name, headers)
     else:
-        print(f"✨ Creating new serverless deployment '{deployment_name}' on Verda (L40S GPU, Scale-to-Zero)...")
+        print(f"✨ Creating new serverless deployment '{deployment_name}' on Verda ({selected_compute['name']} GPU, Scale-to-Zero)...")
         create_payload = {
             "name": deployment_name,
             "container_registry_settings": {
@@ -224,10 +294,7 @@ def provision(env_name: str = "staging"):
                     "name": cred_name
                 }
             },
-            "compute": {
-                "name": "L40S",
-                "size": 1
-            },
+            "compute": selected_compute,
             "scaling": scaling_def,
             "containers": [container_def],
             "is_spot": False
@@ -238,6 +305,7 @@ def provision(env_name: str = "staging"):
         print(f"✅ Deployment '{deployment_name}' created successfully.")
 
         update_deployment_scaling(deployment_name, headers)
+        ensure_deployment_resumed(deployment_name, headers)
 
     # Retrieve endpoint base URL
     print("🌐 Fetching deployment endpoint details...")
@@ -254,7 +322,7 @@ def provision(env_name: str = "staging"):
         time.sleep(3)
 
     if not endpoint_url:
-        endpoint_url = f"https://containers.verda.com/{deployment_name}"
+        endpoint_url = f"https://containers.datacrunch.io/{deployment_name}"
 
     clean_base = endpoint_url.rstrip("/")
     remove_bg_url = f"{clean_base}/remove-background"
