@@ -11,6 +11,7 @@ from fastapi import HTTPException
 from scripts.provision_verda import (
     update_deployment_scaling,
     ensure_deployment_resumed,
+    select_available_compute,
     get_auth_headers,
     provision,
     API_BASE,
@@ -267,6 +268,7 @@ def test_get_auth_headers_requires_verda_credentials(monkeypatch):
 def test_provision_fallback_uses_datacrunch_domain(env_name, expected_deployment):
     with patch("scripts.provision_verda.get_auth_headers", return_value={"Authorization": "Bearer tok"}), \
          patch("scripts.provision_verda.ensure_ghcr_credentials", return_value="ghcr-salp-registry"), \
+         patch("scripts.provision_verda.select_available_compute", return_value={"name": "RTX PRO 6000", "size": 1}), \
          patch("scripts.provision_verda.update_deployment_scaling"), \
          patch("scripts.provision_verda.ensure_deployment_resumed"), \
          patch("scripts.provision_verda.time.sleep"), \
@@ -311,3 +313,33 @@ def test_ensure_deployment_resumed_noop_when_active():
         ensure_deployment_resumed("salp-img-staging", {"Authorization": "Bearer tok"})
 
         mock_post.assert_not_called()
+
+
+def test_select_available_compute_prefers_l40s_when_available():
+    with patch("requests.get") as mock_get:
+        mock_get.return_value = MagicMock(
+            status_code=200,
+            json=lambda: [
+                {"name": "L40S", "size": 1, "is_available": True},
+                {"name": "RTX PRO 6000", "size": 1, "is_available": True},
+            ],
+        )
+        assert select_available_compute({"Authorization": "Bearer tok"}) == {"name": "L40S", "size": 1}
+
+
+def test_select_available_compute_falls_back_when_l40s_unavailable():
+    with patch("requests.get") as mock_get:
+        mock_get.return_value = MagicMock(
+            status_code=200,
+            json=lambda: [
+                {"name": "L40S", "size": 1, "is_available": False},
+                {"name": "RTX PRO 6000", "size": 1, "is_available": True},
+                {"name": "H100", "size": 1, "is_available": True},
+            ],
+        )
+        assert select_available_compute({"Authorization": "Bearer tok"}) == {"name": "RTX PRO 6000", "size": 1}
+
+
+def test_select_available_compute_defaults_on_error():
+    with patch("requests.get", side_effect=requests.RequestException("boom")):
+        assert select_available_compute({"Authorization": "Bearer tok"}) == {"name": "L40S", "size": 1}
