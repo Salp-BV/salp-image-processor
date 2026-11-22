@@ -14,25 +14,9 @@ if sys.platform.startswith("win"):
     except Exception:
         pass
 
-VAULT_PATH = r"C:\Users\jopbr\.gemini\config\infrastructure_keys.env"
-
-def load_vault_env():
-    """Fallback to local master infrastructure keys vault if environment variables not set in shell."""
-    if os.path.exists(VAULT_PATH):
-        try:
-            with open(VAULT_PATH, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if line and not line.startswith("#") and "=" in line:
-                        k, v = line.split("=", 1)
-                        k = k.strip()
-                        v = v.strip().strip('"').strip("'")
-                        if k not in os.environ and v:
-                            os.environ[k] = v
-        except Exception as e:
-            print(f"Notice: unable to load vault {VAULT_PATH}: {e}")
-
-load_vault_env()
+def load_vault_env() -> None:
+    """No-op kept for backwards compatibility; credentials are injected into os.environ via salp-exec."""
+    return None
 
 VERDA_CLIENT_ID = os.getenv("VERDA_CLIENT_ID", "").strip()
 VERDA_CLIENT_SECRET = os.getenv("VERDA_CLIENT_SECRET", "").strip()
@@ -45,7 +29,10 @@ def get_auth_headers() -> dict:
     client_id = os.getenv("VERDA_CLIENT_ID", VERDA_CLIENT_ID).strip()
     client_secret = os.getenv("VERDA_CLIENT_SECRET", VERDA_CLIENT_SECRET).strip()
     if not client_id or not client_secret:
-        raise RuntimeError("VERDA_CLIENT_ID or VERDA_CLIENT_SECRET is not configured.")
+        raise RuntimeError(
+            "VERDA_CLIENT_ID or VERDA_CLIENT_SECRET is not configured. "
+            "Run via: salp-exec --scope ai-providers,github-packages -- python scripts/provision_verda.py <staging|production>"
+        )
 
     token_url = f"{API_BASE}/oauth2/token"
     payload = {
