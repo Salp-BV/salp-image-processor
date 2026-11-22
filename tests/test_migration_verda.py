@@ -11,9 +11,7 @@ import pytest
 import numpy as np
 from PIL import Image
 
-from scripts.provision_verda import load_vault_env
-load_vault_env()
-
+# Credentials are injected into os.environ via `salp-exec --scope ai-providers -- pytest`
 VERDA_ENDPOINT = os.getenv("VERDA_ENDPOINT", "https://containers.datacrunch.io/salp-img-staging").rstrip("/")
 INFERENCE_KEY = os.getenv("VERDA_INFERENCE_API_KEY", "").strip()
 API_KEY = os.getenv("IMAGE_PROCESSOR_API_KEY", os.getenv("RUNPOD_API_KEY", "")).strip()
